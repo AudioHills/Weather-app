@@ -157,7 +157,7 @@
       latitude: lat.toFixed(4), longitude: lon.toFixed(4), timezone: 'auto', timeformat: 'unixtime',
       current: CURRENT, hourly: HOURLY, daily: DAILY, forecast_days: 10, past_hours: 24, forecast_hours: 48,
     });
-    if (minutely) { p.set('minutely_15', 'precipitation,snowfall,weather_code'); p.set('forecast_minutely_15', '13'); }
+    if (minutely) { p.set('minutely_15', 'precipitation,snowfall,weather_code,temperature_2m'); p.set('forecast_minutely_15', '13'); }
     return 'https://api.open-meteo.com/v1/forecast?' + p;
   }
   const aqURL = (lat, lon) => `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&current=us_aqi,pm2_5,pm10,ozone&timezone=auto`;
@@ -299,6 +299,58 @@
     return score(b) > score(a) ? b : a;
   }
 
+  /* Models sometimes call "snow" during cold rain (snow aloft that melts before it lands).
+   * Above +2.5 °C at the surface that's essentially never what you see, so call it rain. */
+  const SNOW_TO_RAIN = { 71: 61, 73: 63, 75: 65, 77: 61, 85: 80, 86: 81 };
+  const RAIN_ABOVE = 2.5;
+  function sanitize(wx) {
+    const fix = (codes, temps) => codes?.forEach((c, i) => { if (SNOW_TO_RAIN[c] && temps?.[i] > RAIN_ABOVE) codes[i] = SNOW_TO_RAIN[c]; });
+    const c = wx.current;
+    if (c && SNOW_TO_RAIN[c.weather_code] && c.temperature_2m > RAIN_ABOVE) c.weather_code = SNOW_TO_RAIN[c.weather_code];
+    fix(wx.hourly?.weather_code, wx.hourly?.temperature_2m);
+    fix(wx.daily?.weather_code, wx.daily?.temperature_2m_min);
+    const m = wx.minutely_15;
+    if (m?.time) {
+      // fall back to the hourly temperature when the 15-min one is missing
+      const hT = t => { const h = wx.hourly, k = h?.time?.findIndex(x => x + 3600 > t); return k >= 0 ? h.temperature_2m[k] : null; };
+      m.time.forEach((t, i) => {
+        const temp = m.temperature_2m?.[i] ?? hT(t);
+        if (temp > RAIN_ABOVE) {
+          if (SNOW_TO_RAIN[m.weather_code?.[i]]) m.weather_code[i] = SNOW_TO_RAIN[m.weather_code[i]];
+          if (m.snowfall) m.snowfall[i] = 0;
+        }
+      });
+    }
+    return wx;
+  }
+
+  /* An actual observation beats a model guess for "what's happening now".
+   * Returns a WMO-style code for an ECCC / NWS condition phrase. */
+  function codeFromText(t) {
+    const s = String(t || '').toLowerCase();
+    if (!s || /not observed|n\/a/.test(s)) return null;
+    if (/thunder/.test(s)) return 95;
+    if (/freezing (rain|drizzle)|ice pellets|sleet/.test(s)) return 66;
+    if (/snow|flurr/.test(s)) return /heavy/.test(s) ? 75 : /light|flurr/.test(s) ? 71 : 73;
+    if (/drizzle/.test(s)) return 51;
+    if (/shower/.test(s)) return 80;
+    if (/rain/.test(s)) return /heavy/.test(s) ? 65 : /light/.test(s) ? 61 : 63;
+    if (/fog|mist|haze|smoke/.test(s)) return 45;
+    if (/overcast|mostly cloudy|^cloudy/.test(s)) return 3;
+    if (/partly|few clouds|mainly cloudy|scattered/.test(s)) return 2;
+    if (/mainly (sunny|clear)|mostly (sunny|clear)/.test(s)) return 1;
+    if (/clear|sunny|fair/.test(s)) return 0;
+    return null;
+  }
+  function nowCondition() {
+    const c = S.wx.current, o = S.local?.obs;
+    if (o?.text && o.at && Date.now() - o.at < 90 * 60e3 && !(o.km > 60)) {
+      const code = codeFromText(o.text);
+      if (code != null) return { code, text: o.text.charAt(0).toUpperCase() + o.text.slice(1).toLowerCase(), src: `Observed · ${o.name} · ${ago(o.at)}` };
+    }
+    return { code: c.weather_code, text: condText(c.weather_code, c.is_day), src: 'Model estimate · Open-Meteo' };
+  }
+
   /* ---------------- Location ---------------- */
   function resolveLocation() {
     if (S.sel !== 'gps') {
@@ -346,7 +398,7 @@
 
       const wx = await wxP;
       if (token !== S.token) return;
-      S.wx = wx; S.fetchedAt = Date.now();
+      S.wx = sanitize(wx); S.fetchedAt = Date.now();
       document.body.classList.remove('loading');
       renderAll();
       ccP.then(cc => { if (token === S.token) Radar.setLocation(lat, lon, cc, wx.current.temperature_2m); });
@@ -362,7 +414,7 @@
         if (token !== S.token) return;
         S.local = n || false;
         if (n && S.loc.gps && S.loc.name === 'My location' && n.city) { S.loc.name = n.city.split(',')[0]; renderLoc(); }
-        renderAlerts(); renderNotes(); renderTiles(); Radar.setAlerts(n?.alerts);
+        renderNow(); renderAlerts(); renderNotes(); renderTiles(); Radar.setAlerts(n?.alerts);
         snapshot();
       });
       snapshot();
@@ -419,8 +471,10 @@
   function renderNow() {
     const c = S.wx.current, d = S.wx.daily, h = S.wx.hourly;
     $('#temp-now').innerHTML = `${ok(c.temperature_2m) ? Math.round(U.t(c.temperature_2m)) : '--'}<sup>°</sup>`;
-    $('#now-icon').innerHTML = icon(c.weather_code, c.is_day);
-    $('#cond-now').textContent = condText(c.weather_code, c.is_day);
+    const nc = nowCondition();
+    $('#now-icon').innerHTML = icon(nc.code, c.is_day);
+    $('#cond-now').textContent = nc.text;
+    $('#cond-src').textContent = nc.src;
     $('#now-clock').textContent = clock();
     const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
     const wd = dirs[Math.round((c.wind_direction_10m ?? 0) / 45) % 8];
@@ -430,26 +484,27 @@
       <div><small>Hi / Lo</small><b>${fT(d.temperature_2m_max[0])}<i>/${fT(d.temperature_2m_min[0])}</i></b></div>
       <div><small>Wind</small><b>${fW(c.wind_speed_10m)}<i>${wd}</i></b></div>
       <div><small>Precip</small><b>${ok(pop) ? Math.round(pop) : '--'}<i>%</i></b></div>`;
-    $('#now-line').textContent = hourlySummary(h, c);
-    document.body.dataset.theme = themeFor(c.weather_code, c.is_day);
-    FX.set(c.weather_code, c.is_day, c.precipitation, c.cloud_cover);
+    $('#now-line').textContent = hourlySummary(h, c, nc.code);
+    document.body.dataset.theme = themeFor(nc.code, c.is_day);
+    FX.set(nc.code, c.is_day, c.precipitation, c.cloud_cover);
   }
 
-  function hourlySummary(h, c) {
+  function hourlySummary(h, c, code = c.weather_code) {
     const i0 = nowIdx(h.time);
     const kindAt = k => (isStorm(h.weather_code[k]) ? 'Thunderstorms' : isSnow(h.weather_code[k]) ? 'Snow' : 'Rain');
     const win = [];
     for (let k = i0 + 1; k < Math.min(h.time.length, i0 + 13); k++) win.push(k);
     let sum;
-    if (isWet(c.weather_code) || isWet(h.weather_code[i0])) {
+    if (isWet(code)) {
       const dry = win.find(k => !isWet(h.weather_code[k]));
-      sum = dry ? `${kindAt(i0)} easing around ${hourL(h.time[dry])}.` : `${kindAt(i0)} through the next 12 hours.`;
+      const kind = isStorm(code) ? 'Thunderstorms' : isSnow(code) ? 'Snow' : 'Rain';
+      sum = dry ? `${kind} easing around ${hourL(h.time[dry])}.` : `${kind} through the next 12 hours.`;
     } else {
       const wet = win.find(k => isWet(h.weather_code[k]) && (h.precipitation_probability[k] ?? 0) >= 40);
-      const shift = win.find(k => themeFor(h.weather_code[k], 1) !== themeFor(c.weather_code, 1));
+      const shift = win.find(k => themeFor(h.weather_code[k], 1) !== themeFor(code, 1));
       sum = wet ? `${kindAt(wet)} likely from around ${hourL(h.time[wet])}.`
         : shift ? `${condText(h.weather_code[shift], h.is_day[shift])} from around ${hourL(h.time[shift])}.`
-          : `${condText(c.weather_code, c.is_day)} for the next several hours.`;
+          : `${condText(code, c.is_day)} for the next several hours.`;
     }
     const gustMax = Math.max(...h.wind_gusts_10m.slice(i0, i0 + 12).filter(ok));
     if (gustMax > 40) sum += ` Gusts to ${fW(gustMax)} ${U.windU()}.`;
