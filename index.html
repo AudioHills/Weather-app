@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+  <title>Weather</title>
+  <meta name="description" content="Hyper-local weather, minute-by-minute precipitation and live radar.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Weather">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="theme-color" content="#0b1026">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body data-theme="clear-night">
+  <div id="bg"></div>
+  <canvas id="fx" aria-hidden="true"></canvas>
+
+  <header id="topbar">
+    <button id="btn-places" class="icon-btn" aria-label="Locations">
+      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
+    </button>
+    <div id="mini"><span id="mini-name"></span><span id="mini-temp"></span></div>
+    <button id="btn-units" class="icon-btn pill" aria-label="Toggle units">°F</button>
+  </header>
+
+  <div id="ptr"><div class="spinner"></div></div>
+
+  <main id="main">
+    <section id="hero">
+      <div id="loc-name">Locating…</div>
+      <div id="loc-sub"></div>
+      <div id="temp-now">--</div>
+      <div id="cond-now">&nbsp;</div>
+      <div id="hilo">&nbsp;</div>
+      <div id="loc-chip" hidden></div>
+    </section>
+
+    <div id="alerts"></div>
+
+    <section class="card" id="card-nowcast">
+      <h3 class="card-h"><svg viewBox="0 0 24 24"><path d="M12 3c3 4 6 7.5 6 11a6 6 0 0 1-12 0c0-3.5 3-7 6-11z"/></svg>Next 3 hours</h3>
+      <p id="nowcast-summary" class="lead">&nbsp;</p>
+      <div id="nowcast-chart"></div>
+    </section>
+
+    <section class="card" id="card-hourly">
+      <h3 class="card-h"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Hourly</h3>
+      <p id="hourly-summary" class="lead small"></p>
+      <div id="hourly" class="hscroll"></div>
+    </section>
+
+    <section class="card" id="card-radar">
+      <h3 class="card-h"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12l6-6"/></svg>Radar<span id="radar-src" class="chip"></span></h3>
+      <div id="radar-slot">
+        <div id="radar-wrap">
+          <div id="map"></div>
+          <button id="radar-close" class="icon-btn glass" aria-label="Close radar">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+          <button id="radar-locate" class="icon-btn glass" aria-label="Center on location">
+            <svg viewBox="0 0 24 24"><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2" class="fill"/></svg>
+          </button>
+          <div id="radar-tap" aria-label="Expand radar"></div>
+          <div id="radar-ctrl" class="glass">
+            <button id="radar-play" class="icon-btn" aria-label="Play">
+              <svg viewBox="0 0 24 24" class="i-play"><path class="fill" d="M8 5v14l11-7z"/></svg>
+              <svg viewBox="0 0 24 24" class="i-pause"><path class="fill" d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+            </button>
+            <input id="radar-range" type="range" min="0" max="0" value="0" aria-label="Radar time">
+            <span id="radar-time">--</span>
+          </div>
+          <div id="radar-legend"><span>Light</span><i></i><span>Heavy</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="card-nws" hidden>
+      <h3 class="card-h"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>Forecaster notes</h3>
+      <div id="nws-periods"></div>
+    </section>
+
+    <section class="card" id="card-daily">
+      <h3 class="card-h"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>10-day forecast</h3>
+      <div id="daily"></div>
+    </section>
+
+    <div id="tiles" class="tiles"></div>
+
+    <footer id="footer">
+      <div id="updated"></div>
+      <div class="sources">Forecast &amp; air quality: Open-Meteo (HRRR / NBM blend in the US) · Radar: NOAA NEXRAD via Iowa Environmental Mesonet, RainViewer · Alerts &amp; observations: National Weather Service · Map © OpenStreetMap, © CARTO</div>
+      <div id="install-hint" hidden>Tip: tap <b>Share</b> → <b>Add to Home Screen</b> to install this app.</div>
+    </footer>
+  </main>
+
+  <div id="sheet" aria-hidden="true">
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-panel">
+      <div class="grabber"></div>
+      <div class="sheet-head">
+        <h2>Locations</h2>
+        <button id="sheet-close" class="text-btn">Done</button>
+      </div>
+      <div class="search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <input id="search" type="search" placeholder="Search city, ZIP or place" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
+      </div>
+      <div id="sheet-msg" hidden></div>
+      <div id="search-results"></div>
+      <div id="place-list"></div>
+    </div>
+  </div>
+
+  <div id="toast" role="status"></div>
+
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
