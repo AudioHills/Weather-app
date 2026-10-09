@@ -150,7 +150,7 @@
   }
 
   const CURRENT = 'temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,dew_point_2m,visibility,uv_index';
-  const HOURLY = 'temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,is_day,wind_speed_10m,wind_gusts_10m,uv_index,pressure_msl';
+  const HOURLY = 'cloud_cover,temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,is_day,wind_speed_10m,wind_gusts_10m,uv_index,pressure_msl';
   const DAILY = 'weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,daylight_duration,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max';
   function forecastURL(lat, lon, minutely) {
     const p = new URLSearchParams({
@@ -303,12 +303,24 @@
    * Above +2.5 °C at the surface that's essentially never what you see, so call it rain. */
   const SNOW_TO_RAIN = { 71: 61, 73: 63, 75: 65, 77: 61, 85: 80, 86: 81 };
   const RAIN_ABOVE = 2.5;
+  const LOW_POP = 30;
+  const cloudCode = cc => (cc == null ? 2 : cc >= 75 ? 3 : cc >= 30 ? 2 : 1);
   function sanitize(wx) {
     const fix = (codes, temps) => codes?.forEach((c, i) => { if (SNOW_TO_RAIN[c] && temps?.[i] > RAIN_ABOVE) codes[i] = SNOW_TO_RAIN[c]; });
     const c = wx.current;
     if (c && SNOW_TO_RAIN[c.weather_code] && c.temperature_2m > RAIN_ABOVE) c.weather_code = SNOW_TO_RAIN[c.weather_code];
     fix(wx.hourly?.weather_code, wx.hourly?.temperature_2m);
     fix(wx.daily?.weather_code, wx.daily?.temperature_2m_min);
+    // A model will tag an hour "light snow" for a trace amount at a 10% chance; show cloud instead
+    const h = wx.hourly, d = wx.daily;
+    h?.weather_code?.forEach((code, i) => {
+      const pop = h.precipitation_probability?.[i];
+      if (isWet(code) && pop != null && pop < LOW_POP) h.weather_code[i] = cloudCode(h.cloud_cover?.[i]);
+    });
+    d?.weather_code?.forEach((code, i) => {
+      const pop = d.precipitation_probability_max?.[i];
+      if (isWet(code) && pop != null && pop < LOW_POP) d.weather_code[i] = 2;
+    });
     const m = wx.minutely_15;
     if (m?.time) {
       // fall back to the hourly temperature when the 15-min one is missing
@@ -414,7 +426,7 @@
         if (token !== S.token) return;
         S.local = n || false;
         if (n && S.loc.gps && S.loc.name === 'My location' && n.city) { S.loc.name = n.city.split(',')[0]; renderLoc(); }
-        renderNow(); renderAlerts(); renderNotes(); renderTiles(); Radar.setAlerts(n?.alerts);
+        renderNow(); renderNowcast(); renderHourly(); renderAlerts(); renderNotes(); renderTiles(); Radar.setAlerts(n?.alerts);
         snapshot();
       });
       snapshot();
@@ -526,19 +538,24 @@
     if (m?.time?.length) {
       const out = [];
       m.time.forEach((t, i) => { if (t + 900 > now && out.length < 12) out.push({ t, p: m.precipitation[i] ?? 0, snow: (m.snowfall?.[i] ?? 0) > 0 || isSnow(m.weather_code?.[i]) }); });
-      if (out.length >= 8) return out;
+      if (out.length >= 8) return withPop(out);
     }
     const h = S.wx.hourly, i0 = nowIdx(h.time), out = [];
     for (let i = i0; i < i0 + 3 && i < h.time.length; i++)
       for (let q = 0; q < 4; q++) out.push({ t: h.time[i] + q * 900, p: (h.precipitation[i] ?? 0) / 4, snow: isSnow(h.weather_code[i]) });
-    return out.filter(s => s.t + 900 > now).slice(0, 12);
+    return withPop(out.filter(s => s.t + 900 > now).slice(0, 12));
+  }
+  function withPop(series) {
+    const h = S.wx.hourly;
+    return series.map(v => { const k = h.time.findIndex(t => t + 3600 > v.t); return { ...v, pop: k >= 0 ? h.precipitation_probability[k] : null }; });
   }
 
   function renderNowcast() {
     const s = precipSeries();
     const now = Date.now() / 1000;
-    const TH = 0.02; // mm per 15 min ≈ trace
-    const wet = s.map(v => v.p >= TH);
+    const TH = 0.05; // mm per 15 min (0.2 mm/h) — below this it's a trace you won't notice
+    const obsDry = nowCondition().src.startsWith('Observed') && !isWet(nowCondition().code);
+    const wet = s.map((v, i) => v.p >= TH && !(v.pop != null && v.pop < LOW_POP) && !(obsDry && i < 2));
     const kind = s.some((v, i) => wet[i] && v.snow) ? 'Snow' : 'Rain';
     const minsTo = i => (s[i].t - now) / 60;
     let txt;
@@ -560,7 +577,7 @@
     const W = 320, H = 104, top = 10, base = 78;
     const scale = v => Math.sqrt(clamp(v * 4 / 10, 0, 1)); // mm/h; sqrt keeps drizzle visible, 10 mm/h tops out
     const n = Math.max(1, s.length - 1);
-    const pts = s.map((v, i) => [i / n * W, base - (v.p >= TH ? scale(v.p) : 0) * (base - top)]);
+    const pts = s.map((v, i) => [i / n * W, base - (wet[i] ? scale(v.p) : 0) * (base - top)]);
     const col = kind === 'Snow' ? '#dff1ff' : '#4fa8ff';
     const line = smooth(pts);
     const area = pts.length ? `${line}L${W} ${base}L0 ${base}z` : '';
@@ -594,7 +611,7 @@
     idx.forEach((i, k) => {
       const x = k * CW + CW / 2, pop = h.precipitation_probability[i] ?? 0;
       g += `<text class="h-hour ${k === 0 ? 'now' : ''}" x="${x}" y="14" text-anchor="middle">${k === 0 ? 'NOW' : hourL(h.time[i])}</text>`;
-      g += `<svg x="${x - 15}" y="22" width="30" height="30" viewBox="0 0 64 64">${iconG(h.weather_code[i], h.is_day[i])}</svg>`;
+      g += `<svg x="${x - 15}" y="22" width="30" height="30" viewBox="0 0 64 64">${iconG(k === 0 ? nowCondition().code : h.weather_code[i], h.is_day[i])}</svg>`;
       g += `<text class="h-temp" x="${x}" y="${(pts[k][1] - 10).toFixed(1)}" text-anchor="middle">${fT(temps[k])}</text>`;
       g += `<circle cx="${x}" cy="${pts[k][1].toFixed(1)}" r="${k === 0 ? 4.5 : 2.5}" fill="${k === 0 ? '#fff' : tColor(temps[k])}"/>`;
       const bh = Math.max(2, pop / 100 * 34);

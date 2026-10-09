@@ -1,7 +1,7 @@
 // App-shell service worker: network-first for our own files (so updates land
 // immediately), cached fallback when offline. API calls go straight to the network;
 // the app keeps its own last-known snapshot for offline use.
-const VERSION = 'wx-v3';
+const VERSION = 'wx-v4';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'manifest.webmanifest',
   'vendor/maplibre/maplibre-gl.js', 'vendor/maplibre/maplibre-gl.css',
@@ -25,7 +25,7 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(new Request(e.request.url, { cache: 'no-cache', credentials: 'same-origin' }))
       .then(res => {
         if (res.ok) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(e.request, copy)); }
         return res;
