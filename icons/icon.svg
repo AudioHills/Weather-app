@@ -1,15 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1f6fd1"/>
-      <stop offset="1" stop-color="#7cc0f5"/>
-    </linearGradient>
-    <radialGradient id="sun" cx=".4" cy=".4" r=".7">
-      <stop offset="0" stop-color="#FFE27A"/>
-      <stop offset="1" stop-color="#FFB627"/>
+    <radialGradient id="glow" cx=".3" cy=".25" r=".8">
+      <stop offset="0" stop-color="#ff9a3c" stop-opacity=".55"/>
+      <stop offset=".45" stop-color="#5b4bff" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#08090c" stop-opacity="0"/>
     </radialGradient>
+    <linearGradient id="sun" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd27a"/>
+      <stop offset="1" stop-color="#ff6a3d"/>
+    </linearGradient>
+    <linearGradient id="cloud" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#c9d2e3"/>
+    </linearGradient>
   </defs>
-  <rect width="512" height="512" fill="url(#bg)"/>
-  <circle cx="200" cy="196" r="92" fill="url(#sun)"/>
-  <path transform="translate(96 132) scale(6.2)" d="M20 46h27a11 11 0 0 0 1.5-21.9A15 15 0 0 0 20.2 20 13 13 0 0 0 20 46z" fill="#fff"/>
+  <rect width="512" height="512" fill="#08090c"/>
+  <rect width="512" height="512" fill="url(#glow)"/>
+  <circle cx="206" cy="200" r="96" fill="url(#sun)"/>
+  <path transform="translate(92 140) scale(6.3)" d="M20 46h27a11 11 0 0 0 1.5-21.9A15 15 0 0 0 20.2 20 13 13 0 0 0 20 46z" fill="url(#cloud)" opacity=".96"/>
+  <path d="M128 420h256" stroke="#4fa8ff" stroke-width="14" stroke-linecap="round" opacity=".9"/>
+  <path d="M176 452h160" stroke="#4fa8ff" stroke-width="14" stroke-linecap="round" opacity=".45"/>
 </svg>

@@ -1,10 +1,11 @@
 // App-shell service worker: network-first for our own files (so updates land
 // immediately), cached fallback when offline. API calls go straight to the network;
 // the app keeps its own last-known snapshot for offline use.
-const VERSION = 'wx-v1';
+const VERSION = 'wx-v2';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'manifest.webmanifest',
-  'vendor/leaflet/leaflet.js', 'vendor/leaflet/leaflet.css',
+  'vendor/maplibre/maplibre-gl.js', 'vendor/maplibre/maplibre-gl.css',
+  'fonts/space-grotesk.woff2', 'fonts/jetbrains-mono-400.woff2', 'fonts/jetbrains-mono-500.woff2',
   'icons/icon.svg', 'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
