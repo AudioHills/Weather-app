@@ -1233,7 +1233,7 @@
       const end = Math.floor((Date.now() - 10 * 60e3) / step) * step;
       return Array.from({ length: n }, (_, i) => end - (n - 1 - i) * step);
     }
-    const wms = (layer, t) => `${GEOMET}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&LAYERS=${encodeURIComponent(layer)}&STYLES=&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX={bbox-epsg-3857}&TIME=${new Date(t).toISOString().replace('.000Z', 'Z')}`;
+    const wms = (layer, t, style = '') => `${GEOMET}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&LAYERS=${encodeURIComponent(layer)}&STYLES=${style}&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX={bbox-epsg-3857}&TIME=${new Date(t).toISOString().replace('.000Z', 'Z')}`;
     const utcStamp = t => new Date(t).toISOString().replace(/[-:T]/g, '').slice(0, 12);
     const IEM = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/';
     const IEM_ATTR = 'NEXRAD via Iowa Environmental Mesonet';
@@ -1254,7 +1254,7 @@
       return { frame: past.at(-1), past };
     }
 
-    // NOAA HRRR simulated radar via IEM: every 15 min to +18 h, coloured by precipitation type
+    // NOAA HRRR simulated radar reflectivity via IEM: every 15 min to +18 h
     async function hrrrFrames(after, until, stepMin) {
       const meta = await getJSON('https://mesonet.agron.iastate.edu/data/gis/images/4326/hrrr/refd_1080.json');
       const init = Date.parse(meta.model_init_utc);
@@ -1264,7 +1264,7 @@
       for (let m = 0; m <= 1080; m += 15) {
         const t = init + m * 60e3;
         if (t <= next || t > until) continue;
-        out.push({ t, kind: 'hrrr', attr: 'NOAA HRRR via Iowa Environmental Mesonet', url: `${IEM}hrrr::REFP-F${String(m).padStart(4, '0')}-${utcStamp(init)}/{z}/{x}/{y}.png` });
+        out.push({ t, kind: 'hrrr', attr: 'NOAA HRRR via Iowa Environmental Mesonet', url: `${IEM}hrrr::REFD-F${String(m).padStart(4, '0')}-${utcStamp(init)}/{z}/{x}/{y}.png` });
         next = t + stepMin * 60e3 * 0.9;
       }
       return out;
@@ -1278,9 +1278,10 @@
         start = Date.parse(xml.match(/<Dimension[^>]*name="time"[^>]*>([^<\/]+)/i)[1].trim());
       } catch { /* fall back to whole hours */ }
       if (!Number.isFinite(start)) start = Math.floor(Date.now() / H1) * H1 - 12 * H1;
+      start = Math.ceil(start / H1) * H1; // model output is valid on the hour
       const out = [];
       for (let t = start; t <= start + 48 * H1; t += H1) {
-        if (t > after + 20 * 60e3 && t <= until) out.push({ t, kind: 'hrdps', size: 512, attr: '© Environment and Climate Change Canada (HRDPS)', url: wms(layer, t) });
+        if (t > after + 20 * 60e3 && t <= until) out.push({ t, kind: 'hrdps', size: 512, attr: '© Environment and Climate Change Canada (HRDPS)', url: wms(layer, t, 'PRECIPPRTMMH') });
       }
       return out;
     }
@@ -1309,7 +1310,7 @@
       }
       // Fill the rest with a high-resolution model
       if (last < until - stepMin * 60e3 * 0.5 && inNorthAmerica(lat, lon)) {
-        const useHrrr = inConus(lat, lon) && (cc === 'US' || lat < 48);
+        const useHrrr = inConus(lat, lon) && (cc === 'US' || (!cc && lat < 44));
         let model = [];
         if (useHrrr) { try { model = await hrrrFrames(last, until, Math.max(15, stepMin)); } catch { model = []; } }
         if (model.length) last = model.at(-1).t;

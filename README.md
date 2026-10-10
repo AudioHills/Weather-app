@@ -13,7 +13,7 @@ No build step, no API keys, no tracking. It's just static files.
   - US: NOAA NEXRAD.
   - Rest of the world: RainViewer.
   - Tap the source tag to switch sources, including Environment Canada's **precipitation type** view (rain / snow / mix). Warning areas are drawn on the map. Tap the map to go full-screen and pinch to zoom.
-  - **Look ahead +1 h, +3 h, +12 h or +24 h.** The loop starts at the latest real radar image ("now"). It then continues with Environment Canada's radar extrapolation, which tracks the echoes forward for the next hour or two. After that comes model-simulated precipitation: Environment Canada's HRDPS (2.5 km, hourly) in Canada, or NOAA's HRRR (3 km, every 15 minutes to +18 h) in the US. The time label says which one you're looking at. Outside North America, where there's no forecast imagery, it shows the past hour.
+  - **Look ahead +1 h, +3 h, +12 h or +24 h.** The loop starts at the latest real radar image ("now"). It then continues with Environment Canada's radar extrapolation, which tracks the echoes forward for the next hour or two. After that comes model-simulated precipitation: Environment Canada's HRDPS (2.5 km, hourly) in Canada, or NOAA's HRRR simulated reflectivity (3 km, every 15 minutes to +18 h) in the US. The time label says which one you're looking at. Outside North America, where there's no forecast imagery, it shows the past hour.
   - The snow radar is only used when snow is actually observed or it's −2°C or colder. Environment Canada's snow layer shows every echo as snowfall, so using it at other times paints rain as snow.
 - **Storm lab** (severe-weather environment from GFS/HRRR model soundings):
   - CAPE, CIN and lifted index
