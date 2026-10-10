@@ -1309,7 +1309,7 @@
       }
       // Fill the rest with a high-resolution model
       if (last < until - stepMin * 60e3 * 0.5 && inNorthAmerica(lat, lon)) {
-        const useHrrr = cc === 'US' ? inConus(lat, lon) : !cc && inConus(lat, lon) && lat < 44;
+        const useHrrr = inConus(lat, lon) && (cc === 'US' || lat < 48);
         let model = [];
         if (useHrrr) { try { model = await hrrrFrames(last, until, Math.max(15, stepMin)); } catch { model = []; } }
         if (model.length) last = model.at(-1).t;
@@ -1356,7 +1356,26 @@
       ticksEl.innerHTML = frames.map(f => `<i${f.kind === 'radar' ? ' class="fc"' : f.kind === 'hrdps' || f.kind === 'hrrr' ? ' class="md"' : ''}></i>`).join('');
       idx = 0;
       show(latest);
-      setTimeout(() => seq === loadSeq && play(), 1500);
+      waitForFrames(seq);
+    }
+    const isLoaded = i => !!frames[i]?.loaded;
+    // Poll until every frame's tiles for the current view are in (or 25 s pass), then play
+    function waitForFrames(seq) {
+      const t0 = Date.now();
+      const poll = () => {
+        if (seq !== loadSeq) return;
+        let n = 0;
+        frames.forEach((f, i) => { if (!f.loaded && map.getSource('rf' + i) && map.isSourceLoaded('rf' + i)) f.loaded = true; if (f.loaded) n++; });
+        [...ticksEl.children].forEach((el, k) => el.classList.toggle('wait', !isLoaded(k)));
+        if (n < frames.length && Date.now() - t0 < 25e3) {
+          if (!playing) timeEl.querySelector('small') && (timeEl.querySelector('small').textContent = `loading ${n}/${frames.length}`);
+          setTimeout(poll, 300);
+        } else {
+          show(idx);
+          if (!playing) play();
+        }
+      };
+      poll();
     }
     function clearFrames() {
       for (let i = 0; i < 64; i++) {
@@ -1366,6 +1385,13 @@
       frames = [];
     }
 
+    // Hourly forecast for the spot on the map says (almost) nothing falls at time t
+    function dryAt(t) {
+      const h = S.wx?.hourly;
+      if (!h) return false;
+      const k = h.time.findIndex(x => x * 1000 + 3600e3 > t);
+      return k >= 0 && (h.precipitation[k] ?? 0) < 0.1 && (h.precipitation_probability[k] ?? 0) < 30;
+    }
     function show(i) {
       if (!frames.length) return;
       if (map.getLayer('rf' + idx)) map.setPaintProperty('rf' + idx, 'raster-opacity', 0);
@@ -1382,8 +1408,8 @@
       const ahead = Math.max(0, Math.round((f.t - frames[latest].t) / 60000));
       const span = ahead >= 90 ? `+${Math.round(ahead / 30) / 2} h` : `+${ahead} min`;
       const rel = f.kind === 'now' && idx === latest ? 'now · radar'
-        : f.kind === 'radar' ? `${span} · radar fcst`
-          : f.kind === 'hrdps' || f.kind === 'hrrr' ? `${span} · ${f.kind.toUpperCase()}`
+        : f.kind === 'radar' ? `${span} · radar fcst${dryAt(f.t) ? ' · dry' : ''}`
+          : f.kind === 'hrdps' || f.kind === 'hrrr' ? `${span} · ${f.kind.toUpperCase()}${dryAt(f.t) ? ' · dry' : ''}`
             : Math.abs(mins) >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`;
       timeEl.innerHTML = `${clockTxt}<small>${rel}</small>`;
     }
@@ -1393,7 +1419,8 @@
       const step = frames.length > 20 ? 300 : 420;
       const tick = () => {
         if (!playing) return;
-        const next = (idx + 1) % frames.length;
+        let next = (idx + 1) % frames.length;
+        for (let k = 0; k < frames.length && !isLoaded(next); k++) next = (next + 1) % frames.length; // skip frames still loading
         show(next);
         timer = setTimeout(tick, next === frames.length - 1 || next === latest ? 1500 : step);
       };
