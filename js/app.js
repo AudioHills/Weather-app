@@ -1225,86 +1225,126 @@
       const end = Math.floor((Date.now() - 10 * 60e3) / step) * step;
       return Array.from({ length: n }, (_, i) => end - (n - 1 - i) * step);
     }
-    // keep every n-th item counting back from the newest
-    const thin = (arr, n) => arr.filter((_, i) => (arr.length - 1 - i) % n === 0);
     const wms = (layer, t) => `${GEOMET}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&LAYERS=${encodeURIComponent(layer)}&STYLES=&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX={bbox-epsg-3857}&TIME=${new Date(t).toISOString().replace('.000Z', 'Z')}`;
     const utcStamp = t => new Date(t).toISOString().replace(/[-:T]/g, '').slice(0, 12);
     const IEM = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/';
     const IEM_ATTR = 'NEXRAD via Iowa Environmental Mesonet';
 
-    async function buildFrames(key, h) {
-      const fr = [];
+    // Latest observed radar image from the chosen source — the "now" frame
+    async function observedNow(key) {
       if (key === 'eccc' || key === 'eccc-type') {
         const layer = key === 'eccc-type' ? SRC[key].layer : snow ? 'RADAR_1KM_RSNO' : 'RADAR_1KM_RRAI';
-        const since = Date.now() - h * 3600e3 - 3 * 60e3;
-        const past = thin((await ecccTimes(layer, 31)).filter(t => t >= since), h <= 1 ? 1 : 2);
-        past.forEach(t => fr.push({ t, size: 512, attr: '© Environment and Climate Change Canada', url: wms(layer, t) }));
-        if (key === 'eccc' && past.length) {
-          // Environment Canada's radar extrapolation: where the echoes are heading next
-          const ex = snow ? 'Radar_1km_SnowPrecipRate-Extrapolation' : 'Radar_1km_RainPrecipRate-Extrapolation';
-          const last = past.at(-1), horizon = (h <= 1 ? 60 : 120) * 60e3;
-          const fut = (await ecccTimes(ex, 80, true)).filter(t => t > last && t <= last + horizon);
-          thin(fut.reverse(), h <= 1 ? 1 : 2).reverse().slice(0, 12)
-            .forEach(t => fr.push({ t, fc: true, size: 512, attr: '© Environment and Climate Change Canada', url: wms(ex, t) }));
-        }
-      } else if (key === 'iem') {
-        const step5 = 5 * 60e3, base = Math.floor((Date.now() - 2 * 60e3) / step5) * step5;
-        if (h <= 1) {
-          for (let m = 55; m >= 0; m -= 5) {
-            const name = m === 0 ? 'nexrad-n0q-900913' : `nexrad-n0q-900913-m${String(m).padStart(2, '0')}m`;
-            fr.push({ t: base - m * 60e3, attr: IEM_ATTR, url: `${IEM}${name}/{z}/{x}/{y}.png?_=${base}` });
-          }
-        } else {
-          // IEM archives the US composite every 5 min; sample it for longer loops
-          const stepMin = h <= 3 ? 15 : h <= 12 ? 30 : 60, n = h * 60 / stepMin;
-          const arcBase = Math.floor((Date.now() - 10 * 60e3) / step5) * step5;
-          for (let k = n; k >= 1; k--) {
-            const t = arcBase - k * stepMin * 60e3; // stays on IEM's 5-min marks
-            fr.push({ t, attr: IEM_ATTR, url: `${IEM}ridge::USCOMP-N0Q-${utcStamp(t)}/{z}/{x}/{y}.png` });
-          }
-          fr.push({ t: base, attr: IEM_ATTR, url: `${IEM}nexrad-n0q-900913/{z}/{x}/{y}.png?_=${base}` });
-        }
-      } else {
-        const j = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
-        const since = Date.now() - h * 3600e3 - 5 * 60e3;
-        (j.radar?.past || []).filter(f => f.time * 1000 >= since)
-          .forEach(f => fr.push({ t: f.time * 1000, maxzoom: 7, attr: '<a href="https://www.rainviewer.com">Weather data by RainViewer</a>', url: `${j.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png` }));
+        const t = (await ecccTimes(layer, 1)).at(-1);
+        return { t, kind: 'now', size: 512, attr: '© Environment and Climate Change Canada', url: wms(layer, t) };
       }
-      return fr;
+      if (key === 'iem') {
+        const step5 = 5 * 60e3, base = Math.floor((Date.now() - 2 * 60e3) / step5) * step5;
+        return { t: base, kind: 'now', attr: IEM_ATTR, url: `${IEM}nexrad-n0q-900913/{z}/{x}/{y}.png?_=${base}` };
+      }
+      const j = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
+      const past = (j.radar?.past || []).map(f => ({ t: f.time * 1000, kind: 'now', maxzoom: 7, attr: '<a href="https://www.rainviewer.com">Weather data by RainViewer</a>', url: `${j.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png` }));
+      return { frame: past.at(-1), past };
+    }
+
+    // NOAA HRRR simulated radar via IEM: every 15 min to +18 h, coloured by precipitation type
+    async function hrrrFrames(after, until, stepMin) {
+      const meta = await getJSON('https://mesonet.agron.iastate.edu/data/gis/images/4326/hrrr/refd_1080.json');
+      const init = Date.parse(meta.model_init_utc);
+      if (!Number.isFinite(init)) return [];
+      const out = [];
+      let next = after + stepMin * 60e3 * 0.5;
+      for (let m = 0; m <= 1080; m += 15) {
+        const t = init + m * 60e3;
+        if (t <= next || t > until) continue;
+        out.push({ t, kind: 'hrrr', attr: 'NOAA HRRR via Iowa Environmental Mesonet', url: `${IEM}hrrr::REFP-F${String(m).padStart(4, '0')}-${utcStamp(init)}/{z}/{x}/{y}.png` });
+        next = t + stepMin * 60e3 * 0.9;
+      }
+      return out;
+    }
+    // Environment Canada HRDPS (2.5 km) instantaneous precipitation rate: hourly to +48 h
+    async function hrdpsFrames(after, until) {
+      const layer = 'HRDPS.CONTINENTAL_RT', H1 = 3600e3;
+      let start = null;
+      try {
+        const xml = await (await fetch(`${GEOMET}?service=WMS&version=1.3.0&request=GetCapabilities&layer=${layer}`)).text();
+        start = Date.parse(xml.match(/<Dimension[^>]*name="time"[^>]*>([^<\/]+)/i)[1].trim());
+      } catch { /* fall back to whole hours */ }
+      if (!Number.isFinite(start)) start = Math.floor(Date.now() / H1) * H1 - 12 * H1;
+      const out = [];
+      for (let t = start; t <= start + 48 * H1; t += H1) {
+        if (t > after + 20 * 60e3 && t <= until) out.push({ t, kind: 'hrdps', size: 512, attr: '© Environment and Climate Change Canada (HRDPS)', url: wms(layer, t) });
+      }
+      return out;
+    }
+
+    // Timeline = latest radar ("now") → radar extrapolation → model-simulated precipitation, out to +h hours
+    async function buildFrames(key, h) {
+      const [lat, lon] = center;
+      const obs = await observedNow(key);
+      const nowFrame = obs.frame || obs;
+      if (!nowFrame?.t) return { frames: [] };
+      const fr = [nowFrame], until = Math.max(Date.now(), nowFrame.t) + h * 3600e3;
+      const stepMin = { 1: 6, 3: 15, 12: 30, 24: 60 }[h] || 15;
+      let last = nowFrame.t, radarEnd = null;
+
+      if (inNorthAmerica(lat, lon) && h <= 3) {
+        // Environment Canada's radar extrapolation (tracks the echoes forward; Canada + US)
+        const ex = snow ? 'Radar_1km_SnowPrecipRate-Extrapolation' : 'Radar_1km_RainPrecipRate-Extrapolation';
+        const times = (await ecccTimes(ex, 80, true)).filter(t => t > last && t <= until);
+        let next = last;
+        for (const t of times) {
+          if (t < next + stepMin * 60e3 * 0.9) continue;
+          fr.push({ t, kind: 'radar', size: 512, attr: '© Environment and Climate Change Canada', url: wms(ex, t) });
+          next = t;
+        }
+        if (fr.length > 1) { last = fr.at(-1).t; radarEnd = last; }
+      }
+      // Fill the rest with a high-resolution model
+      if (last < until - stepMin * 60e3 * 0.5 && inNorthAmerica(lat, lon)) {
+        const useHrrr = cc === 'US' ? inConus(lat, lon) : !cc && inConus(lat, lon) && lat < 44;
+        let model = [];
+        if (useHrrr) { try { model = await hrrrFrames(last, until, Math.max(15, stepMin)); } catch { model = []; } }
+        if (model.length) last = model.at(-1).t;
+        if (last < until - 30 * 60e3) { try { model = model.concat(await hrdpsFrames(last, until)); } catch { /* none */ } }
+        fr.push(...model);
+      }
+      if (fr.length === 1 && obs.past) {
+        // No forecast imagery for this region — fall back to the past hour so there's still motion
+        return { frames: obs.past.filter(f => f.t >= nowFrame.t - 3600e3), pastOnly: true };
+      }
+      return { frames: fr, radarEnd };
     }
 
     async function load() {
       if (!ready || !center) return;
-      const seq = ++loadSeq, want = pick(), s = sig();
-      let key = want, h = hours, msgTxt = '';
-      // ECCC keeps only 3 h of radar; RainViewer 2 h. Fill longer loops from the US archive where it reaches.
-      if (h > 3 && key.startsWith('eccc')) {
-        if (inConus(...center)) { key = 'iem'; msgTxt = cc === 'CA' ? 'Beyond 3 h: US NEXRAD archive — coverage thins north of the border' : ''; }
-        else { h = 3; msgTxt = 'Environment Canada keeps 3 h of radar'; }
-      }
-      if (h > 2 && key === 'rv') { h = 2; msgTxt = 'RainViewer keeps 2 h of radar'; }
+      const seq = ++loadSeq, key = pick(), s = sig();
       stop();
-      let fr;
-      try { fr = await buildFrames(key, h); } catch { fr = []; }
+      let res;
+      try { res = await buildFrames(key, hours); } catch { res = { frames: [] }; }
       if (seq !== loadSeq) return; // superseded while loading
+      const fr = res.frames;
       if (!fr.length) { timeEl.textContent = 'offline'; return; }
       clearFrames();
-      source = want; loadedSig = s; loadedAt = Date.now(); frames = fr;
-      latest = fr.reduce((a, f, i) => (f.fc ? a : i), 0);
+      source = key; loadedSig = s; loadedAt = Date.now(); frames = fr;
+      latest = res.pastOnly ? fr.length - 1 : 0;
       const isType = key === 'eccc-type';
-      srcEl.textContent = key === 'eccc' ? `ECCC · ${snow ? 'Snow' : 'Rain'}` : key === 'iem' && want !== 'iem' ? 'NEXRAD archive' : SRC[key].label;
+      srcEl.textContent = key === 'eccc' ? `ECCC · ${snow ? 'Snow' : 'Rain'}` : SRC[key].label;
       $('#radar-legend i').style.display = isType ? 'none' : '';
       $('#radar-legend').style.setProperty('--legend', key === 'eccc' && snow ? SNOW_LEGEND : SRC[key].legend || '');
       $('#legend-l').textContent = isType ? 'Rain · snow · mix' : key === 'eccc' && snow ? 'Light snow' : 'Light';
       $('#legend-r').textContent = isType ? '' : 'Heavy';
-      note(msgTxt);
+      const models = [...new Set(fr.filter(f => f.kind === 'hrdps' || f.kind === 'hrrr').map(f => f.kind.toUpperCase()))];
+      const lastT = fr.at(-1).t, short = (lastT - fr[0].t) < hours * 3600e3 * 0.8;
+      note(res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
+        : models.length ? `${res.radarEnd ? `After ${fmt('rt', { hour: 'numeric', minute: '2-digit' }).format(res.radarEnd)}: ` : ''}${models.join(' + ')} model-simulated precipitation${short ? ' (as far as the model goes)' : ''}`
+          : short ? 'Radar forecast only reaches this far right now' : '');
       const before = map.getLayer('alerts-fill') ? 'alerts-fill' : firstSymbol;
       frames.forEach((f, i) => {
         map.addSource('rf' + i, { type: 'raster', tiles: [f.url], tileSize: f.size || 256, maxzoom: f.maxzoom || 12, attribution: f.attr });
         map.addLayer({ id: 'rf' + i, type: 'raster', source: 'rf' + i, paint: { 'raster-opacity': 0, 'raster-opacity-transition': { duration: 0 }, 'raster-fade-duration': 0 } }, before);
       });
       range.max = frames.length - 1;
-      ticksEl.innerHTML = frames.map(f => `<i${f.fc ? ' class="fc"' : ''}></i>`).join('');
+      ticksEl.innerHTML = frames.map(f => `<i${f.kind === 'radar' ? ' class="fc"' : f.kind === 'hrdps' || f.kind === 'hrrr' ? ' class="md"' : ''}></i>`).join('');
       idx = 0;
       show(latest);
       setTimeout(() => seq === loadSeq && play(), 1500);
@@ -1330,7 +1370,12 @@
       const f = frames[idx], mins = Math.round((f.t - Date.now()) / 60000);
       const long = frames.length && frames.at(-1).t - frames[0].t > 6 * 3600e3;
       const clockTxt = fmt(long ? 'rtl' : 'rt', long ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { hour: 'numeric', minute: '2-digit' }).format(f.t);
-      const rel = f.fc ? `+${Math.max(0, mins)} min · forecast` : idx === latest ? 'latest' : Math.abs(mins) >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`;
+      const ahead = Math.max(0, Math.round((f.t - frames[latest].t) / 60000));
+      const span = ahead >= 90 ? `+${Math.round(ahead / 30) / 2} h` : `+${ahead} min`;
+      const rel = f.kind === 'now' && idx === latest ? 'now · radar'
+        : f.kind === 'radar' ? `${span} · radar fcst`
+          : f.kind === 'hrdps' || f.kind === 'hrrr' ? `${span} · ${f.kind.toUpperCase()}`
+            : Math.abs(mins) >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`;
       timeEl.innerHTML = `${clockTxt}<small>${rel}</small>`;
     }
     function play() {

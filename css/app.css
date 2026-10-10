@@ -409,6 +409,9 @@ body.loading .panel { animation: breathe 1.6s ease-in-out infinite; }
 #radar-note[hidden] { display: none; }
 #radar-ticks i.fc { background: rgba(255, 255, 255, .12); }
 #radar-ticks i.fc.on { background: color-mix(in srgb, var(--a1) 45%, transparent); }
+#radar-ticks i.md { background: rgba(255, 255, 255, .1); height: 60%; align-self: center; }
+#radar-ticks i.md.on { background: color-mix(in srgb, var(--a2) 70%, #fff 10%); }
+#radar-time { min-width: 76px; }
 
 /* ---------- Storm lab ---------- */
 #sev-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
