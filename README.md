@@ -27,6 +27,7 @@ No build step, no API keys, no tracking. It's just static files.
 - **Latest observation**: Environment Canada's current conditions for the nearest city, or the closest NWS station in the US
 - **Forecaster notes**: Environment Canada or NWS text forecast for your area
 - 30-hour temperature curve with icons, precipitation chances and sunrise/sunset markers; 10-day forecast as temperature-range columns (tap a day for details)
+- **Diurnal cycle**: today's temperature curve from midnight to midnight, overlaid with yesterday and tomorrow, with the high and low times, night shading, the day's range and the change from yesterday
 - Wind compass, feels-like, UV (with "use sun protection until…"), air quality (US AQI, PM2.5, ozone), humidity and dew point, visibility, pressure trend, rainfall totals, sun arc, moon phase
 - Background and animated rain, snow or stars that match the current conditions
 - Saved locations with live temperatures, city and ZIP search, °F/°C toggle

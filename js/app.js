@@ -155,7 +155,7 @@
   function forecastURL(lat, lon, minutely) {
     const p = new URLSearchParams({
       latitude: lat.toFixed(4), longitude: lon.toFixed(4), timezone: 'auto', timeformat: 'unixtime',
-      current: CURRENT, hourly: HOURLY, daily: DAILY, forecast_days: 10, past_hours: 24, forecast_hours: 48,
+      current: CURRENT, hourly: HOURLY, daily: DAILY, forecast_days: 10, past_hours: 48, forecast_hours: 48,
     });
     if (minutely) { p.set('minutely_15', 'precipitation,snowfall,weather_code,temperature_2m'); p.set('forecast_minutely_15', '13'); }
     return 'https://api.open-meteo.com/v1/forecast?' + p;
@@ -900,6 +900,10 @@
     const out = [];
     const nowS = Date.now() / 1000;
 
+    // Diurnal cycle
+    const di = diurnal();
+    if (di) out.push(tile('Diurnal cycle', di, 'wide'));
+
     // Wind
     const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
     const wd = c.wind_direction_10m ?? 0, ws = c.wind_speed_10m, wdTxt = dirs[Math.round(wd / 22.5) % 16];
@@ -950,7 +954,7 @@
     const p0 = c.pressure_msl, p3 = h.pressure_msl[i0 - 3];
     const dp = ok(p0) && ok(p3) ? p0 - p3 : 0;
     const trend = dp > 1 ? 'Rising' : dp < -1 ? 'Falling' : 'Steady';
-    const ps = h.pressure_msl.map((v, k) => [h.time[k], v]).filter(([, v]) => ok(v));
+    const ps = h.pressure_msl.map((v, k) => [h.time[k], v]).filter(([t, v]) => ok(v) && t >= nowS - 86400);
     let spark = '';
     if (ps.length > 4 && ok(p0)) {
       const pl = Math.min(...ps.map(p => p[1])), ph = Math.max(...ps.map(p => p[1])), pspan = Math.max(2, ph - pl);
@@ -1018,6 +1022,56 @@
       const el = p.querySelector('.ph-n');
       if (el && !p.hidden) el.textContent = String(++n).padStart(2, '0');
     });
+  }
+
+  // Today's temperature from midnight to midnight, with yesterday and tomorrow on the same clock
+  function diurnal() {
+    const h = S.wx.hourly, d = S.wx.daily, nowS = Date.now() / 1000, D = 86400;
+    const d0 = d.time[0];
+    const day = s => h.time.map((t, k) => [t, h.temperature_2m[k]]).filter(([t, v]) => t >= s && t <= s + D && ok(v)).map(([t, v]) => [(t - s) / 3600, v]);
+    const [yd, td, tm] = [day(d0 - D), day(d0), day(d0 + D)];
+    if (td.length < 12) return '';
+    const vals = [...yd, ...td, ...tm].map(p => p[1]);
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = Math.max(4, hi - lo);
+    const W = 320, top = 18, bot = 122, x = hr => 6 + hr / 24 * (W - 12), y = v => top + (hi - v) / span * (bot - top);
+    const path = ser => smooth(ser.map(([hr, v]) => [x(hr), y(v)]));
+    const rise = (d.sunrise[0] - d0) / 3600, set = (d.sunset[0] - d0) / 3600;
+    const nowHr = (nowS - d0) / 3600;
+    const tMin = td.reduce((a, p) => (p[1] < a[1] ? p : a)), tMax = td.reduce((a, p) => (p[1] > a[1] ? p : a));
+    const stops = td.map(([hr, v]) => `<stop offset="${(hr / 24).toFixed(3)}" stop-color="${tColor(v)}"/>`).join('');
+    const dT = v => (us() ? v * 1.8 : v);
+    const fmtD = v => `${v >= 0 ? '+' : '−'}${Math.abs(Math.round(dT(v)))}°`;
+    const ydMax = yd.length ? Math.max(...yd.map(p => p[1])) : null;
+    const hrLbl = hr => hourL(d0 + hr * 3600).toLowerCase();
+    let g = `<defs><linearGradient id="dig" gradientUnits="userSpaceOnUse" x1="${x(0)}" x2="${x(24)}" y1="0" y2="0">${stops}</linearGradient></defs>`;
+    // night shading
+    g += `<rect x="${x(0)}" y="${top - 8}" width="${(x(rise) - x(0)).toFixed(1)}" height="${bot - top + 8}" fill="rgba(120,140,255,.07)"/>`;
+    g += `<rect x="${x(set).toFixed(1)}" y="${top - 8}" width="${(x(24) - x(set)).toFixed(1)}" height="${bot - top + 8}" fill="rgba(120,140,255,.07)"/>`;
+    [0, 6, 12, 18, 24].forEach(hr => {
+      g += `<line x1="${x(hr)}" x2="${x(hr)}" y1="${top - 8}" y2="${bot}" stroke="rgba(255,255,255,.06)"/>`;
+      g += `<text class="axis" x="${x(hr)}" y="${bot + 14}" text-anchor="${hr === 0 ? 'start' : hr === 24 ? 'end' : 'middle'}">${hrLbl(hr)}</text>`;
+    });
+    if (yd.length > 1) g += `<path d="${path(yd)}" fill="none" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>`;
+    if (tm.length > 1) g += `<path d="${path(tm)}" fill="none" stroke="var(--a1)" stroke-width="1.5" stroke-dasharray="4 4" opacity=".7"/>`;
+    g += `<path d="${path(td)}" fill="none" stroke="url(#dig)" stroke-width="3" stroke-linecap="round"/>`;
+    for (const [p, tag, dy] of [[tMax, 'H', -8], [tMin, 'L', 16]]) {
+      g += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3.5" fill="#fff"/>`;
+      g += `<text class="axis" style="fill:#fff" x="${clamp(x(p[0]), 24, W - 24).toFixed(1)}" y="${(y(p[1]) + dy).toFixed(1)}" text-anchor="middle">${tag} ${fT(p[1])} · ${hrLbl(p[0])}</text>`;
+    }
+    if (nowHr >= 0 && nowHr <= 24) {
+      const k = td.findIndex(p => p[0] >= nowHr), a = td[Math.max(0, k - 1)], b = td[Math.max(0, k)];
+      const v = a && b && b[0] !== a[0] ? a[1] + (b[1] - a[1]) * (nowHr - a[0]) / (b[0] - a[0]) : S.wx.current.temperature_2m;
+      g += `<line x1="${x(nowHr).toFixed(1)}" x2="${x(nowHr).toFixed(1)}" y1="${top - 8}" y2="${bot}" stroke="rgba(255,255,255,.4)" stroke-dasharray="2 3"/>`;
+      g += `<circle cx="${x(nowHr).toFixed(1)}" cy="${y(v).toFixed(1)}" r="5" fill="#0b0c10" stroke="#fff" stroke-width="2.5"/>`;
+    }
+    const range = tMax[1] - tMin[1];
+    const rangeNote = range >= 15 ? 'Big swing — dry air and clear skies let it heat and cool fast.' : range <= 5 ? 'Flat day — clouds, wind or moist air are damping the swing.' : 'A typical day-to-night swing.';
+    return `<svg class="spark" viewBox="0 0 ${W} ${bot + 18}">${g}</svg>
+      <div class="di-key mono"><span><i style="background:rgba(255,255,255,.35)"></i>Yesterday</span><span><i class="today"></i>Today</span><span><i style="background:var(--a1);opacity:.7"></i>Tomorrow</span></div>
+      <div class="obs"><div><small>Range</small><b>${Math.round(dT(range))}°</b></div>
+        <div><small>Low</small><b>${hrLbl(tMin[0])}</b></div><div><small>High</small><b>${hrLbl(tMax[0])}</b></div>
+        <div><small>vs yday</small><b>${ydMax != null ? fmtD(tMax[1] - ydMax) : '--'}</b></div></div>
+      <div class="desc">${rangeNote}</div>`;
   }
 
   function moonPhase(date) {

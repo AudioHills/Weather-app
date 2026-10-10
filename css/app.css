@@ -447,3 +447,8 @@ body.loading .panel { animation: breathe 1.6s ease-in-out infinite; }
 #sev-help dd { margin: 2px 0 0; font-size: 13px; color: var(--fg2); line-height: 1.4; }
 .sev-disc { font-size: 11.5px; color: var(--fg3); margin: 12px 0 0; line-height: 1.4; }
 #radar-ticks i.wait { opacity: .35; }
+
+/* Diurnal cycle */
+.di-key { display: flex; gap: 14px; font-size: 9.5px; color: var(--fg3); text-transform: uppercase; letter-spacing: .4px; margin-top: 2px; }
+.di-key i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+.di-key i.today { background: linear-gradient(90deg, #38bdf8, #84e15a, #facc15); }
