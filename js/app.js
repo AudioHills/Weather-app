@@ -1344,7 +1344,9 @@
       const models = [...new Set(fr.filter(f => f.kind === 'hrdps' || f.kind === 'hrrr').map(f => f.kind.toUpperCase()))];
       const lastT = fr.at(-1).t, short = (lastT - fr[0].t) < hours * 3600e3 * 0.8;
       failed = new Set();
-      note(noteBase = res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
+      const ahead = fr.filter(f => f.kind !== 'now');
+      const allDry = !res.pastOnly && ahead.length > 1 && ahead.every(f => dryAt(f.t));
+      note(noteBase = allDry ? `No precipitation forecast at your location through +${hours} h — zoom out to see rain elsewhere` : res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
         : models.length ? `${res.radarEnd ? `After ${fmt('rt', { hour: 'numeric', minute: '2-digit' }).format(res.radarEnd)}: ` : ''}${models.join(' + ')} model-simulated precipitation${short ? ' (as far as the model goes)' : ''}`
           : short ? 'Radar forecast only reaches this far right now' : '');
       const before = map.getLayer('alerts-fill') ? 'alerts-fill' : firstSymbol;
