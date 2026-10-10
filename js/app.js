@@ -1122,6 +1122,7 @@
     const HANDLERS = ['dragPan', 'scrollZoom', 'boxZoom', 'doubleClickZoom', 'touchZoomRotate', 'keyboard'];
 
     function showMsg(t) { msg.hidden = !t; msg.textContent = t || ''; }
+    let noteBase = '', failed = new Set();
     function note(t) { noteEl.hidden = !t; noteEl.textContent = t || ''; }
 
     function init() {
@@ -1135,7 +1136,14 @@
       } catch { showMsg('The radar map needs WebGL, which isn’t available here'); return false; }
       setInteractive(false);
       map.on('load', () => { restyle(); ready = true; showMsg(''); drawAlerts(); load(); });
-      map.on('error', e => { if (!ready && !e.sourceId) showMsg('Map couldn’t load — check your connection'); });
+      map.on('error', e => {
+        if (!ready && !e.sourceId) showMsg('Map couldn’t load — check your connection');
+        const i = /^rf(\d+)$/.exec(e.sourceId || '')?.[1];
+        if (i != null && frames[+i]) {
+          const what = { now: 'Radar', radar: 'Radar forecast', hrdps: 'HRDPS model', hrrr: 'HRRR model' }[frames[+i].kind] || 'Radar';
+          if (!failed.has(what)) { failed.add(what); note([noteBase, `⚠ ${[...failed].join(', ')} images didn’t load`].filter(Boolean).join(' · ')); }
+        }
+      });
       return true;
     }
 
@@ -1335,7 +1343,8 @@
       $('#legend-r').textContent = isType ? '' : 'Heavy';
       const models = [...new Set(fr.filter(f => f.kind === 'hrdps' || f.kind === 'hrrr').map(f => f.kind.toUpperCase()))];
       const lastT = fr.at(-1).t, short = (lastT - fr[0].t) < hours * 3600e3 * 0.8;
-      note(res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
+      failed = new Set();
+      note(noteBase = res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
         : models.length ? `${res.radarEnd ? `After ${fmt('rt', { hour: 'numeric', minute: '2-digit' }).format(res.radarEnd)}: ` : ''}${models.join(' + ')} model-simulated precipitation${short ? ' (as far as the model goes)' : ''}`
           : short ? 'Radar forecast only reaches this far right now' : '');
       const before = map.getLayer('alerts-fill') ? 'alerts-fill' : firstSymbol;
@@ -1584,6 +1593,10 @@
     else if (S.wx && !document.hidden) { renderNowcast(); $('#now-clock').textContent = clock(); }
   }, 60e3);
   addEventListener('online', () => stale(60e3) && refresh());
+
+  const showErr = m => toast(`Something went wrong: ${String(m).slice(0, 120)}`);
+  addEventListener('error', e => showErr(e.message));
+  addEventListener('unhandledrejection', e => showErr(e.reason?.message || e.reason));
 
   const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
   if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) $('#install-hint').hidden = false;
