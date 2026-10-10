@@ -12,7 +12,16 @@ No build step, no API keys, no tracking. It's just static files.
   - Canada (default): Environment and Climate Change Canada's official 1 km radar composite. It updates every 6 minutes, switches to its snow product when it's freezing, and also covers US radars near the border.
   - US: NOAA NEXRAD.
   - Rest of the world: RainViewer.
-  - Tap the source tag to switch sources. Warning areas are drawn on the map. Tap the map to go full-screen and pinch to zoom.
+  - Tap the source tag to switch sources, including Environment Canada's **precipitation type** view (rain / snow / mix). Warning areas are drawn on the map. Tap the map to go full-screen and pinch to zoom.
+  - **Timeline: 1 h, 3 h, 12 h or 24 h.** In 1 h and 3 h modes, Environment Canada's future radar is added after the latest frame (shown as faded ticks). Environment Canada keeps 3 hours of radar, so 12 h and 24 h loops use the US NEXRAD archive, whose coverage thins north of the border.
+  - The snow radar is only used when snow is actually observed or it's −2°C or colder. Environment Canada's snow layer shows every echo as snowfall, so using it at other times paints rain as snow.
+- **Storm lab** (severe-weather environment from GFS/HRRR model soundings):
+  - CAPE, CIN and lifted index
+  - 0–1 km and 0–6 km shear, and 0–1 km and 0–3 km storm-relative helicity
+  - Cloud-base (LCL) height, 700–500 hPa lapse rate and K index
+  - Significant Tornado Parameter (STP) and Supercell Composite Parameter (SCP)
+  - A hodograph with Bunkers right-mover storm motion
+  - A 48-hour timeline you can tap to inspect any hour, an overall setup rating, and a built-in glossary
 - **Weather alerts**: Environment Canada warnings (Canada) or National Weather Service alerts (US)
 - **Latest observation**: Environment Canada's current conditions for the nearest city, or the closest NWS station in the US
 - **Forecaster notes**: Environment Canada or NWS text forecast for your area

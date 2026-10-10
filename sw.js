@@ -1,7 +1,7 @@
 // App-shell service worker: network-first for our own files (so updates land
 // immediately), cached fallback when offline. API calls go straight to the network;
 // the app keeps its own last-known snapshot for offline use.
-const VERSION = 'wx-v4';
+const VERSION = 'wx-v5';
 const SHELL = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'manifest.webmanifest',
   'vendor/maplibre/maplibre-gl.js', 'vendor/maplibre/maplibre-gl.css',

@@ -16,7 +16,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="preload" href="fonts/space-grotesk.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css">
-  <link rel="stylesheet" href="css/app.css?v=4">
+  <link rel="stylesheet" href="css/app.css?v=5">
 </head>
 <body data-theme="clear-night">
   <div id="aurora" aria-hidden="true"><i></i><i></i></div>
@@ -62,7 +62,13 @@
           <div id="map-msg" class="mono" hidden></div>
           <div id="radar-tap" aria-label="Expand radar"></div>
           <div id="radar-top">
-            <div id="radar-legend" class="mono"><span id="legend-l">Light</span><i></i><span>Heavy</span></div>
+            <div class="radar-left">
+              <div id="radar-range-seg" class="seg mono" role="group" aria-label="Radar timeline">
+                <button data-h="1">1h</button><button data-h="3">3h</button><button data-h="12">12h</button><button data-h="24">24h</button>
+              </div>
+              <div id="radar-legend" class="mono"><span id="legend-l">Light</span><i></i><span id="legend-r">Heavy</span></div>
+              <div id="radar-note" class="mono" hidden></div>
+            </div>
             <div class="radar-btns">
               <button id="radar-locate" class="rbtn" aria-label="Center on location"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
               <button id="radar-close" class="rbtn" aria-label="Close radar"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -94,6 +100,33 @@
     <section class="panel" id="p-notes" hidden>
       <header class="ph"><span class="ph-n mono">05</span><span class="ph-t">Forecaster</span><span id="notes-src" class="ph-x mono"></span></header>
       <div id="notes"></div>
+    </section>
+
+    <section class="panel" id="p-severe" hidden>
+      <header class="ph"><span class="ph-n mono">06</span><span class="ph-t">Storm lab</span><span id="sev-model" class="ph-x mono">GFS · HRRR</span></header>
+      <div id="sev-head"></div>
+      <div id="sev-strip" class="hscroll"></div>
+      <div id="sev-when" class="mono"></div>
+      <div id="sev-grid" class="sev-grid"></div>
+      <div id="sev-hodo"></div>
+      <details id="sev-help">
+        <summary class="mono">What these mean</summary>
+        <dl>
+          <dt>CAPE</dt><dd>Fuel for thunderstorms — how much energy a rising air parcel gains (J/kg). 500+ supports storms, 1,000–2,500 strong storms, 2,500+ explosive.</dd>
+          <dt>CIN</dt><dd>The “cap” holding storms back (J/kg). Near 0 means storms can fire freely; below −100 means a strong cap.</dd>
+          <dt>Lifted index</dt><dd>Instability at ~5.5 km. Negative is unstable: −3 to −6 strong, below −6 extreme.</dd>
+          <dt>0–6 km shear</dt><dd>Change in wind with height. Organizes storms: 35+ kt supports supercells, 50+ kt strongly.</dd>
+          <dt>0–1 km shear</dt><dd>Low-level wind change — key for tornadoes. 20+ kt is notable.</dd>
+          <dt>SRH 0–1 / 0–3 km</dt><dd>Storm-relative helicity: how much spin a storm can ingest (m²/s²). 0–1 km 100+ and 0–3 km 150+ favour rotating storms; 0–1 km 200+ is strongly tornadic.</dd>
+          <dt>LCL height</dt><dd>Cloud-base height. Below ~1,000 m favours tornadoes; above 2,000 m they're unlikely.</dd>
+          <dt>STP</dt><dd>Significant Tornado Parameter — combines CAPE, LCL, SRH, shear and CIN. Above 1 signals significant (EF2+) tornado environments.</dd>
+          <dt>SCP</dt><dd>Supercell Composite Parameter. Above 1 supports supercells; above 4 strongly.</dd>
+          <dt>Lapse rate</dt><dd>Temperature drop from 700 to 500 hPa (°C/km). 7+ is steep and boosts hail and updraft strength.</dd>
+          <dt>K index</dt><dd>Air-mass thunderstorm potential. 30+ scattered storms, 40+ numerous.</dd>
+          <dt>Hodograph</dt><dd>Wind at each height plotted as a curve (red 0–1 km, green 1–3, yellow 3–6, blue 6–9). Long, curved hodographs mean rotating storms. RM is the predicted right-moving supercell motion.</dd>
+        </dl>
+        <p class="sev-disc">Computed from forecast-model soundings (GFS/HRRR via Open-Meteo). A guide to the environment, not an official outlook — always follow Environment Canada / NWS warnings.</p>
+      </details>
     </section>
 
     <div id="tiles" class="bento"></div>
@@ -131,6 +164,6 @@
   <div id="toast" role="status"></div>
 
   <script src="vendor/maplibre/maplibre-gl.js"></script>
-  <script src="js/app.js?v=4"></script>
+  <script src="js/app.js?v=5"></script>
 </body>
 </html>

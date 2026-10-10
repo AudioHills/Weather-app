@@ -396,3 +396,50 @@ body.loading .panel { animation: breathe 1.6s ease-in-out infinite; }
   .stats b { font-size: 15px; }
 }
 @media (min-width: 700px) { #radar-slot { height: 420px; } }
+
+/* ---------- Radar timeline ---------- */
+.radar-left { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.seg button { padding: 5px 9px; border-radius: 9px; color: var(--fg3); font: inherit; transition: .2s; }
+.seg button.on { background: var(--fg); color: #0b0c10; }
+#radar-range-seg { background: rgba(8, 9, 12, .72); border-color: var(--line-2); font-size: 11px; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+#radar-note {
+  max-width: 220px; padding: 5px 8px; border-radius: 8px; font-size: 9.5px; line-height: 1.35; text-transform: uppercase; letter-spacing: .3px;
+  color: #f5d142; background: rgba(8, 9, 12, .72); border: 1px solid var(--line);
+}
+#radar-note[hidden] { display: none; }
+#radar-ticks i.fc { background: rgba(255, 255, 255, .12); }
+#radar-ticks i.fc.on { background: color-mix(in srgb, var(--a1) 45%, transparent); }
+
+/* ---------- Storm lab ---------- */
+#sev-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+.sev-badge { flex: none; padding: 6px 10px; border-radius: 10px; font: 500 10.5px "Mono", monospace; letter-spacing: .5px; text-transform: uppercase; color: #0b0c10; background: var(--lvc, #9aa3b2); }
+.sev-badge[data-lv="0"] { --lvc: #6b7385; color: #fff; }
+.sev-badge[data-lv="1"] { --lvc: #3ee08f; }
+.sev-badge[data-lv="2"] { --lvc: #f5d142; }
+.sev-badge[data-lv="3"] { --lvc: #ff9a3c; }
+.sev-badge[data-lv="4"] { --lvc: #ff4d5e; color: #fff; }
+#sev-head p { margin: 0; font-size: 16px; font-weight: 500; line-height: 1.3; }
+#sev-strip svg { display: block; cursor: pointer; }
+#sev-when { font-size: 10.5px; color: var(--fg3); text-transform: uppercase; letter-spacing: .5px; margin: 10px 0 8px; }
+#sev-when b { color: var(--fg); font-weight: 500; }
+.sev-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.sev-cell { background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px; min-width: 0; }
+.sev-cell small { display: block; font: 500 9px "Mono", monospace; color: var(--fg3); text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; }
+.sev-cell b { font-size: 17px; font-weight: 600; white-space: nowrap; }
+.sev-cell b i { font-style: normal; font-size: 10px; color: var(--fg3); margin-left: 2px; font-weight: 500; }
+.sev-cell[data-lv="1"] b { color: #f5d142; }
+.sev-cell[data-lv="2"] b { color: #ff9a3c; }
+.sev-cell[data-lv="3"] b { color: #ff4d5e; }
+.sev-cell[data-lv="1"], .sev-cell[data-lv="2"], .sev-cell[data-lv="3"] { border-color: var(--line-2); }
+#sev-hodo { margin-top: 12px; display: flex; gap: 12px; align-items: center; }
+#sev-hodo svg { width: 58%; max-width: 260px; height: auto; flex: none; }
+#sev-hodo .hk { font: 400 10.5px "Mono", monospace; color: var(--fg3); text-transform: uppercase; letter-spacing: .3px; line-height: 1.8; }
+#sev-hodo .hk i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+#sev-hodo .hk b { color: var(--fg); font-weight: 500; }
+#sev-help { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+#sev-help summary { list-style: none; cursor: pointer; font-size: 10.5px; color: var(--a1); text-transform: uppercase; letter-spacing: .5px; }
+#sev-help summary::-webkit-details-marker { display: none; }
+#sev-help dl { margin: 10px 0 0; }
+#sev-help dt { font-size: 13px; font-weight: 600; margin-top: 8px; }
+#sev-help dd { margin: 2px 0 0; font-size: 13px; color: var(--fg2); line-height: 1.4; }
+.sev-disc { font-size: 11.5px; color: var(--fg3); margin: 12px 0 0; line-height: 1.4; }

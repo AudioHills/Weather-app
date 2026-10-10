@@ -21,7 +21,7 @@
     units: store.get('units', /^en-US$/i.test(navigator.language || '') ? 'us' : 'metric'),
     places: store.get('places', []),
     sel: store.get('sel', 'gps'),
-    loc: null, wx: null, aq: null, local: null,
+    loc: null, wx: null, aq: null, local: null, sev: null, sevSel: 0,
     fetchedAt: 0, loading: false, token: 0, daySel: 0,
   };
 
@@ -354,6 +354,8 @@
     if (/clear|sunny|fair/.test(s)) return 0;
     return null;
   }
+  // Snow radar only when snow is actually reported, or it's cold enough that precipitation can't be rain
+  const snowingNow = () => isSnow(nowCondition().code) || S.wx.current.temperature_2m <= -2;
   function nowCondition() {
     const c = S.wx.current, o = S.local?.obs;
     if (o?.text && o.at && Date.now() - o.at < 90 * 60e3 && !(o.km > 60)) {
@@ -361,6 +363,111 @@
       if (code != null) return { code, text: o.text.charAt(0).toUpperCase() + o.text.slice(1).toLowerCase(), src: `Observed · ${o.name} · ${ago(o.at)}` };
     }
     return { code: c.weather_code, text: condText(c.weather_code, c.is_day), src: 'Model estimate · Open-Meteo' };
+  }
+
+  /* ---------------- Storm lab: convective parameters from model soundings ---------------- */
+  const LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500, 400];
+  function severeURL(lat, lon, full, model) {
+    const v = ['cape', 'lifted_index', 'temperature_2m', 'dew_point_2m', 'wind_speed_10m', 'wind_direction_10m'];
+    if (full) {
+      v.push('convective_inhibition', 'freezing_level_height');
+      for (const L of LEVELS) v.push(`wind_speed_${L}hPa`, `wind_direction_${L}hPa`, `geopotential_height_${L}hPa`);
+      for (const L of [850, 700, 500]) v.push(`temperature_${L}hPa`, `dew_point_${L}hPa`);
+    }
+    const p = new URLSearchParams({
+      latitude: lat.toFixed(4), longitude: lon.toFixed(4), hourly: v.join(','), wind_speed_unit: 'ms',
+      timezone: 'auto', timeformat: 'unixtime', forecast_hours: 48, past_hours: 1,
+    });
+    if (model) p.set('models', model);
+    return 'https://api.open-meteo.com/v1/forecast?' + p;
+  }
+  async function loadSevere(lat, lon) {
+    // GFS + HRRR (3 km, covers southern Canada) has the full set; fall back if a field isn't offered
+    for (const [full, model] of [[1, 'gfs_seamless'], [1, null], [0, 'gfs_seamless'], [0, null]]) {
+      try {
+        const j = await getJSON(severeURL(lat, lon, full, model));
+        if (j?.hourly?.time?.length) return computeSevere(j, model ? 'GFS · HRRR' : 'Model blend');
+      } catch { /* try the next, smaller request */ }
+    }
+    return null;
+  }
+
+  const KT = 1.943844; // m/s → knots
+  const uvOf = (spd, dir) => ({ u: -spd * Math.sin(dir * Math.PI / 180), v: -spd * Math.cos(dir * Math.PI / 180) });
+  function windAt(pts, z) {
+    if (z <= pts[0].z) return pts[0];
+    for (let k = 1; k < pts.length; k++) {
+      if (z <= pts[k].z) { const a = pts[k - 1], b = pts[k], f = (z - a.z) / (b.z - a.z); return { z, u: a.u + (b.u - a.u) * f, v: a.v + (b.v - a.v) * f }; }
+    }
+    return pts.at(-1);
+  }
+  function meanWind(pts, z0, z1) {
+    let u = 0, v = 0, n = 0;
+    for (let z = z0; z <= z1; z += 100) { const w = windAt(pts, z); u += w.u; v += w.v; n++; }
+    return { u: u / n, v: v / n };
+  }
+  function computeSevere(j, model) {
+    const H = j.hourly, elev = j.elevation ?? 0;
+    const g = (k, i) => (ok(H[k]?.[i]) ? H[k][i] : null);
+    const rows = H.time.map((t, i) => {
+      const r = { t, cape: g('cape', i), li: g('lifted_index', i), fzl: g('freezing_level_height', i) };
+      const cin = g('convective_inhibition', i);
+      r.cin = cin == null ? null : -Math.abs(cin);
+      const T = g('temperature_2m', i), Td = g('dew_point_2m', i);
+      r.lcl = T != null && Td != null ? Math.max(0, 125 * (T - Td)) : null; // Espy's approximation
+      const T8 = g('temperature_850hPa', i), D8 = g('dew_point_850hPa', i), T7 = g('temperature_700hPa', i), D7 = g('dew_point_700hPa', i), T5 = g('temperature_500hPa', i);
+      const z7 = g('geopotential_height_700hPa', i), z5 = g('geopotential_height_500hPa', i);
+      r.lapse = [T7, T5, z7, z5].every(x => x != null) && z5 > z7 ? (T7 - T5) / ((z5 - z7) / 1000) : null;
+      r.k = [T8, D8, T7, D7, T5].every(x => x != null) ? (T8 - T5) + D8 - (T7 - D7) : null;
+      // wind profile (height above ground)
+      const pts = [];
+      if (g('wind_speed_10m', i) != null && g('wind_direction_10m', i) != null) pts.push({ z: 10, ...uvOf(H.wind_speed_10m[i], H.wind_direction_10m[i]) });
+      for (const L of LEVELS) {
+        const gh = g(`geopotential_height_${L}hPa`, i), sp = g(`wind_speed_${L}hPa`, i), dr = g(`wind_direction_${L}hPa`, i);
+        if (gh == null || sp == null || dr == null || gh - elev <= 50) continue;
+        pts.push({ z: gh - elev, ...uvOf(sp, dr) });
+      }
+      pts.sort((a, b) => a.z - b.z);
+      if (pts.length >= 5 && pts[0].z <= 10 && pts.at(-1).z >= 6000) {
+        const sfc = windAt(pts, 10), w1 = windAt(pts, 1000), w6 = windAt(pts, 6000);
+        r.bwd1 = Math.hypot(w1.u - sfc.u, w1.v - sfc.v);
+        r.bwd6 = Math.hypot(w6.u - sfc.u, w6.v - sfc.v);
+        // Bunkers right-moving supercell motion
+        const mean = meanWind(pts, 10, 6000), lo = meanWind(pts, 10, 500), hi = meanWind(pts, 5500, 6000);
+        const su = hi.u - lo.u, sv = hi.v - lo.v, sm = Math.hypot(su, sv) || 1;
+        const rm = { u: mean.u + 7.5 * sv / sm, v: mean.v - 7.5 * su / sm };
+        const srh = top => {
+          let h = 0, prev = windAt(pts, 10);
+          for (let z = 110; z <= top; z += 100) { const w = windAt(pts, z); h += (w.u - rm.u) * (prev.v - rm.v) - (prev.u - rm.u) * (w.v - rm.v); prev = w; }
+          return h;
+        };
+        Object.assign(r, { srh1: srh(1000), srh3: srh(3000), rm, pts: pts.filter(p => p.z <= 9500).map(p => ({ z: Math.round(p.z), u: +p.u.toFixed(1), v: +p.v.toFixed(1) })) });
+      }
+      // Significant Tornado Parameter (fixed layer) & Supercell Composite Parameter
+      if (r.cape != null && r.srh1 != null && r.bwd6 != null) {
+        const lclT = r.lcl == null ? 1 : r.lcl < 1000 ? 1 : r.lcl > 2000 ? 0 : (2000 - r.lcl) / 1000;
+        const shT = r.bwd6 < 12.5 ? 0 : r.bwd6 > 30 ? 1.5 : r.bwd6 / 20;
+        const cinT = r.cin == null ? 1 : r.cin > -50 ? 1 : r.cin < -200 ? 0 : (200 + r.cin) / 150;
+        r.stp = Math.max(0, (r.cape / 1500) * lclT * (r.srh1 / 150) * shT * cinT);
+        const scpSh = r.bwd6 < 10 ? 0 : r.bwd6 > 20 ? 1 : r.bwd6 / 20;
+        r.scp = Math.max(0, (r.cape / 1000) * (r.srh3 / 50) * scpSh);
+      }
+      r.lv = sevLevel(r);
+      return r;
+    });
+    const now = Date.now() / 1000;
+    return { model, rows: rows.filter(r => r.t + 3600 > now).slice(0, 48) };
+  }
+  // 0 quiet · 1 thunderstorms · 2 organized · 3 supercells · 4 tornado ingredients
+  function sevLevel(r) {
+    const cape = r.cape ?? 0, kt = (r.bwd6 ?? 0) * KT;
+    if (cape < 100) return 0;            // no instability, no storms — however strong the wind
+    if (cape < 250) return (r.li ?? 0) <= -2 ? 1 : 0;
+    if ((r.stp ?? 0) >= 1) return 4;
+    if ((r.scp ?? 0) >= 4 || (r.stp ?? 0) >= 0.5) return 3;
+    if ((cape >= 1000 && kt >= 30) || (r.scp ?? 0) >= 1) return 2;
+    if (cape >= 500 && (r.li ?? 0) <= -2) return 1;
+    return 0;
   }
 
   /* ---------------- Location ---------------- */
@@ -398,7 +505,7 @@
       }
       if (token !== S.token) return;
       const sameSpot = S.loc && S.loc.id === loc.id && haversine(S.loc.lat, S.loc.lon, loc.lat, loc.lon) < 0.3;
-      if (!sameSpot) { S.local = null; S.aq = null; }
+      if (!sameSpot) { S.local = null; S.aq = null; S.sev = null; }
       S.loc = loc;
       renderLoc();
       const { lat, lon } = loc;
@@ -407,14 +514,16 @@
       const geoP = loc.gps ? reverseGeocode(lat, lon).catch(() => null) : Promise.resolve(null);
       const ccP = loc.cc ? Promise.resolve(loc.cc) : geoP.then(g => g?.cc || guessCountry(lat, lon));
       const localP = ccP.then(cc => loadLocal(lat, lon, cc)).catch(() => null);
+      const sevP = loadSevere(lat, lon).catch(() => null);
 
       const wx = await wxP;
       if (token !== S.token) return;
       S.wx = sanitize(wx); S.fetchedAt = Date.now();
       document.body.classList.remove('loading');
       renderAll();
-      ccP.then(cc => { if (token === S.token) Radar.setLocation(lat, lon, cc, wx.current.temperature_2m); });
+      ccP.then(cc => { if (token === S.token) { Radar.setSnow(snowingNow()); Radar.setLocation(lat, lon, cc); } });
 
+      sevP.then(sv => { if (token === S.token) { S.sev = sv || false; S.sevSel = 0; renderSevere(); snapshot(); } });
       aqP.then(aq => { if (token === S.token) { S.aq = aq || false; renderTiles(); snapshot(); } });
       geoP.then(g => {
         if (token !== S.token || !g) return;
@@ -426,7 +535,7 @@
         if (token !== S.token) return;
         S.local = n || false;
         if (n && S.loc.gps && S.loc.name === 'My location' && n.city) { S.loc.name = n.city.split(',')[0]; renderLoc(); }
-        renderNow(); renderNowcast(); renderHourly(); renderAlerts(); renderNotes(); renderTiles(); Radar.setAlerts(n?.alerts);
+        renderNow(); renderNowcast(); renderHourly(); renderAlerts(); renderNotes(); renderTiles(); Radar.setAlerts(n?.alerts); Radar.setSnow(snowingNow());
         snapshot();
       });
       snapshot();
@@ -439,7 +548,7 @@
   }
 
   function snapshot() {
-    store.set('snap2', { loc: S.loc, wx: S.wx, aq: S.aq, local: S.local, at: S.fetchedAt });
+    store.set('snap2', { loc: S.loc, wx: S.wx, aq: S.aq, local: S.local, sev: S.sev, at: S.fetchedAt });
   }
 
   /* ---------------- Rendering ---------------- */
@@ -454,7 +563,7 @@
     if (!S.wx) return;
     TZ = S.wx.timezone;
     document.body.dataset.units = S.units;
-    renderLoc(); renderNow(); renderAlerts(); renderNowcast(); renderHourly(); renderDaily(); renderNotes(); renderTiles(); renderFooter();
+    renderLoc(); renderNow(); renderAlerts(); renderNowcast(); renderHourly(); renderDaily(); renderNotes(); renderSevere(); renderTiles(); renderFooter();
   }
 
   function renderLoc() {
@@ -680,9 +789,104 @@
     $('#notes').innerHTML = p.slice(0, 3).map(x => `<div class="note-p"><b>${esc(x.name)}</b><p>${esc(x.text)}</p></div>`).join('');
   }
 
+  /* ---- Storm lab ---- */
+  const SEV_NAMES = ['Quiet', 'Storms', 'Organized', 'Supercell', 'Tornado'];
+  const SEV_COLS = ['rgba(255,255,255,.14)', '#3ee08f', '#f5d142', '#ff9a3c', '#ff4d5e'];
+  const sevWhen = t => fmt('sw', { weekday: 'short', hour: 'numeric' }).format(t * 1000).replace(',', '').replace(/\s(?=[AP]M)/i, '').replace(':00', '');
+  // [label, value text, unit, level 0-3]
+  function sevCells(r) {
+    const lv = (v, a, b, c, rev) => (v == null ? 0 : rev ? (v <= c ? 3 : v <= b ? 2 : v <= a ? 1 : 0) : (v >= c ? 3 : v >= b ? 2 : v >= a ? 1 : 0));
+    const n0 = v => (v == null ? '--' : Math.round(v).toLocaleString());
+    const n1 = v => (v == null ? '--' : v.toFixed(1));
+    const ht = m => (m == null ? '--' : us() ? Math.round(m * 3.281 / 100) * 100 : Math.round(m / 50) * 50);
+    const kt = v => (v == null ? null : v * KT);
+    return [
+      ['CAPE', n0(r.cape), 'J/kg', lv(r.cape, 500, 1000, 2500)],
+      ['CIN', n0(r.cin), 'J/kg', 0],
+      ['Lifted idx', n1(r.li), '', lv(r.li, -1, -3, -6, true)],
+      ['Shear 0–6', n0(kt(r.bwd6)), 'kt', lv(kt(r.bwd6), 25, 35, 50)],
+      ['Shear 0–1', n0(kt(r.bwd1)), 'kt', lv(kt(r.bwd1), 15, 20, 30)],
+      ['SRH 0–1', n0(r.srh1), 'm²/s²', lv(r.srh1, 75, 150, 250)],
+      ['SRH 0–3', n0(r.srh3), 'm²/s²', lv(r.srh3, 100, 200, 350)],
+      ['LCL', r.lcl == null ? '--' : ht(r.lcl).toLocaleString(), us() ? 'ft' : 'm', r.lcl == null ? 0 : r.lcl < 1000 ? 3 : r.lcl < 1500 ? 2 : r.lcl < 2000 ? 1 : 0],
+      ['STP', n1(r.stp), '', lv(r.stp, 0.5, 1, 3)],
+      ['SCP', n1(r.scp), '', lv(r.scp, 1, 4, 10)],
+      ['Lapse 7–5', n1(r.lapse), '°C/km', lv(r.lapse, 6.5, 7, 8)],
+      ['K index', n0(r.k), '', lv(r.k, 25, 30, 40)],
+    ];
+  }
+
+  function renderSevere() {
+    const sv = S.sev, panel = $('#p-severe');
+    panel.hidden = !sv?.rows?.length;
+    if (panel.hidden) { renumber(); return; }
+    const rows = sv.rows, sel = rows[clamp(S.sevSel, 0, rows.length - 1)];
+    $('#sev-model').textContent = sv.model;
+
+    // Headline: the most significant setup in the next 48 h
+    const score = r => (r.stp ?? 0) * 4 + (r.scp ?? 0) + (r.cape ?? 0) / 1000 + r.lv * 10;
+    const peak = rows.reduce((a, r) => (score(r) > score(a) ? r : a), rows[0]);
+    const lvl = peak.lv;
+    const phrase = ['No severe-weather setup in the next 48 h', 'Thunderstorms possible', 'Organized severe storms possible', 'Supercells possible', 'Tornado ingredients in place'][lvl];
+    const facts = lvl ? ` — peaking ${sevWhen(peak.t)}: CAPE ${Math.round(peak.cape ?? 0).toLocaleString()} J/kg${peak.bwd6 != null ? `, 0–6 km shear ${Math.round(peak.bwd6 * KT)} kt` : ''}${peak.srh1 != null && lvl >= 3 ? `, 0–1 km SRH ${Math.round(peak.srh1)}` : ''}.` : '.';
+    $('#sev-head').innerHTML = `<span class="sev-badge" data-lv="${lvl}">${SEV_NAMES[lvl]}</span><p>${phrase}${facts}</p>`;
+
+    // 48 h strip: CAPE bars coloured by setup level; tap an hour to inspect it
+    const CW = 16, H = 92, base = 70;
+    const capeMax = Math.max(1500, ...rows.map(r => r.cape ?? 0));
+    let g = '';
+    rows.forEach((r, i) => {
+      const x = i * CW, bh = Math.max(2, (r.cape ?? 0) / capeMax * 58);
+      if (i === S.sevSel) g += `<rect x="${x}" y="0" width="${CW}" height="${base + 2}" rx="4" fill="rgba(255,255,255,.08)"/>`;
+      g += `<rect x="${x + 3}" y="${(base - bh).toFixed(1)}" width="${CW - 6}" height="${bh.toFixed(1)}" rx="2" fill="${r.lv ? SEV_COLS[r.lv] : 'rgba(255,255,255,.22)'}"/>`;
+      if ((r.stp ?? 0) >= 1) g += `<circle cx="${x + CW / 2}" cy="${(base - bh - 6).toFixed(1)}" r="2.5" fill="#ff4d5e"/>`;
+      if (i % 6 === 0) g += `<text class="axis" x="${x + 2}" y="${H - 4}">${i === 0 ? 'now' : sevWhen(r.t)}</text>`;
+      g += `<rect data-i="${i}" x="${x}" y="0" width="${CW}" height="${H}" fill="transparent"/>`;
+    });
+    $('#sev-strip').innerHTML = `<svg width="${rows.length * CW}" height="${H}" viewBox="0 0 ${rows.length * CW} ${H}"><line x1="0" x2="${rows.length * CW}" y1="${base}" y2="${base}" stroke="rgba(255,255,255,.15)"/>${g}</svg>`;
+    $('#sev-when').innerHTML = `CAPE by hour · showing <b>${S.sevSel === 0 ? 'now' : sevWhen(sel.t)}</b>`;
+
+    $('#sev-grid').innerHTML = sevCells(sel).map(([l, v, u, lv]) => `<div class="sev-cell" data-lv="${lv}"><small>${l}</small><b>${v}${u ? `<i>${u}</i>` : ''}</b></div>`).join('');
+    $('#sev-hodo').innerHTML = sel.pts ? hodograph(sel) : '';
+    renumber();
+  }
+  $('#sev-strip').addEventListener('click', e => {
+    const r = e.target.closest('[data-i]');
+    if (!r) return;
+    S.sevSel = +r.dataset.i;
+    const sx = $('#sev-strip').scrollLeft;
+    renderSevere();
+    $('#sev-strip').scrollLeft = sx;
+  });
+
+  function hodograph(r) {
+    const S2 = 240, c = S2 / 2;
+    const prof = [];
+    for (let z = 10; z <= Math.min(9000, r.pts.at(-1).z); z += 250) prof.push(windAt(r.pts, z));
+    const maxKt = Math.max(40, ...prof.map(w => Math.hypot(w.u, w.v) * KT), Math.hypot(r.rm.u, r.rm.v) * KT);
+    const ring = Math.ceil(maxKt / 20) * 20, sc = (c - 14) / ring;
+    const X = w => c + w.u * KT * sc, Y = w => c - w.v * KT * sc;
+    let g = '';
+    for (let k = 20; k <= ring; k += 20) g += `<circle cx="${c}" cy="${c}" r="${(k * sc).toFixed(1)}" fill="none" stroke="rgba(255,255,255,.1)"/><text class="axis" x="${c + 3}" y="${(c - k * sc + 11).toFixed(1)}">${k}</text>`;
+    g += `<line x1="0" x2="${S2}" y1="${c}" y2="${c}" stroke="rgba(255,255,255,.12)"/><line y1="0" y2="${S2}" x1="${c}" x2="${c}" stroke="rgba(255,255,255,.12)"/>`;
+    const bands = [[0, 1000, '#ff4d5e'], [1000, 3000, '#3ee08f'], [3000, 6000, '#f5d142'], [6000, 9001, '#4fa8ff']];
+    for (const [z0, z1, col] of bands) {
+      const seg = prof.filter(w => w.z >= z0 - 250 && w.z <= z1);
+      if (seg.length > 1) g += `<path d="M${seg.map(w => `${X(w).toFixed(1)} ${Y(w).toFixed(1)}`).join('L')}" fill="none" stroke="${col}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }
+    for (const km of [1, 3, 6]) { const w = windAt(r.pts, km * 1000); g += `<circle cx="${X(w).toFixed(1)}" cy="${Y(w).toFixed(1)}" r="3" fill="#fff"/><text class="axis" x="${(X(w) + 5).toFixed(1)}" y="${(Y(w) - 4).toFixed(1)}" style="fill:#fff">${km}</text>`; }
+    g += `<circle cx="${X(r.rm).toFixed(1)}" cy="${Y(r.rm).toFixed(1)}" r="4" fill="none" stroke="#fff" stroke-width="2"/><text class="axis" x="${(X(r.rm) + 6).toFixed(1)}" y="${(Y(r.rm) + 4).toFixed(1)}" style="fill:#fff">RM</text>`;
+    const rmSpd = Math.round(Math.hypot(r.rm.u, r.rm.v) * KT);
+    const rmDir = Math.round((Math.atan2(-r.rm.u, -r.rm.v) * 180 / Math.PI + 360) % 360); // direction it moves *from*
+    const toDir = (rmDir + 180) % 360, card = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(toDir / 45) % 8];
+    return `<svg viewBox="0 0 ${S2} ${S2}">${g}</svg>
+      <div class="hk"><div><b>Hodograph</b></div><div><i style="background:#ff4d5e"></i>0–1 km</div><div><i style="background:#3ee08f"></i>1–3 km</div>
+        <div><i style="background:#f5d142"></i>3–6 km</div><div><i style="background:#4fa8ff"></i>6–9 km</div>
+        <div style="margin-top:6px">Storm motion (RM)</div><div><b>${rmSpd} kt toward ${card}</b></div><div>rings: knots</div></div>`;
+  }
+
   /* ---- Detail tiles ---- */
-  let tileN = 5;
-  const tile = (title, body, cls = '') => `<section class="panel ${cls}"><header class="ph"><span class="ph-n mono">${String(++tileN).padStart(2, '0')}</span><span class="ph-t">${title}</span></header>${body}</section>`;
+  const tile = (title, body, cls = '') => `<section class="panel ${cls}"><header class="ph"><span class="ph-n mono"></span><span class="ph-t">${title}</span></header>${body}</section>`;
   function ring(frac, color, text) {
     const r = 34, C = 2 * Math.PI * r, f = clamp(frac, 0, 1);
     return `<svg class="ring" viewBox="0 0 84 84"><circle cx="42" cy="42" r="${r}" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="8"/>
@@ -692,7 +896,6 @@
 
   function renderTiles() {
     if (!S.wx) return;
-    tileN = S.local?.periods?.length ? 5 : 4;
     const c = S.wx.current, h = S.wx.hourly, d = S.wx.daily, i0 = nowIdx(h.time);
     const out = [];
     const nowS = Date.now() / 1000;
@@ -807,6 +1010,14 @@
         ${o.text ? `<div class="desc">${esc(o.text)}</div>` : ''}`, 'wide'));
     }
     $('#tiles').innerHTML = out.join('');
+    renumber();
+  }
+  function renumber() {
+    let n = 0;
+    document.querySelectorAll('#main .panel').forEach(p => {
+      const el = p.querySelector('.ph-n');
+      if (el && !p.hidden) el.textContent = String(++n).padStart(2, '0');
+    });
   }
 
   function moonPhase(date) {
@@ -897,18 +1108,21 @@
     const STYLE = 'https://tiles.openfreemap.org/styles/dark';
     const GEOMET = 'https://geo.weather.gc.ca/geomet';
     const SRC = {
-      'eccc-rain': { label: 'ECCC · Rain', layer: 'RADAR_1KM_RRAI', legend: 'linear-gradient(90deg,#a5f3fc,#38bdf8,#2563eb,#22c55e,#facc15,#f97316,#dc2626,#a21caf)' },
-      'eccc-snow': { label: 'ECCC · Snow', layer: 'RADAR_1KM_RSNO', legend: 'linear-gradient(90deg,#e0f2fe,#93c5fd,#60a5fa,#3b82f6,#8b5cf6,#c026d3)' },
-      iem: { label: 'NOAA NEXRAD', legend: 'linear-gradient(90deg,#4ade80,#16a34a,#facc15,#f97316,#dc2626,#c026d3)' },
+      eccc: { label: 'ECCC', legend: 'linear-gradient(90deg,#a5f3fc,#38bdf8,#2563eb,#22c55e,#facc15,#f97316,#dc2626,#a21caf)' },
+      'eccc-type': { label: 'ECCC · Type', layer: 'Radar_1km_SfcPrecipType' },
+      iem: { label: 'NEXRAD', legend: 'linear-gradient(90deg,#4ade80,#16a34a,#facc15,#f97316,#dc2626,#c026d3)' },
       rv: { label: 'RainViewer', legend: 'linear-gradient(90deg,#9be7ff,#3fa9f5,#1f5fd1,#f5d742,#f5732f,#e13a3a)' },
     };
-    let map, ready = false, marker, frames = [], idx = 0, timer = 0, playing = false, firstSymbol, loadSeq = 0;
-    let center = null, cc = null, temp = null, source = null, forced = null, loadedAt = 0, alerts = [];
+    const SNOW_LEGEND = 'linear-gradient(90deg,#e0f2fe,#93c5fd,#60a5fa,#3b82f6,#8b5cf6,#c026d3)';
+    let map, ready = false, marker, frames = [], idx = 0, timer = 0, playing = false, firstSymbol, loadSeq = 0, latest = 0;
+    let center = null, cc = null, snow = false, source = null, forced = null, loadedSig = '', loadedAt = 0, alerts = [];
+    let hours = [1, 3, 12, 24].includes(store.get('radarHours', 1)) ? store.get('radarHours', 1) : 1;
     const wrap = $('#radar-wrap'), slot = $('#radar-slot'), range = $('#radar-range'), playBtn = $('#radar-play');
-    const timeEl = $('#radar-time'), srcEl = $('#radar-src'), ticksEl = $('#radar-ticks'), msg = $('#map-msg');
+    const timeEl = $('#radar-time'), srcEl = $('#radar-src'), ticksEl = $('#radar-ticks'), msg = $('#map-msg'), noteEl = $('#radar-note');
     const HANDLERS = ['dragPan', 'scrollZoom', 'boxZoom', 'doubleClickZoom', 'touchZoomRotate', 'keyboard'];
 
     function showMsg(t) { msg.hidden = !t; msg.textContent = t || ''; }
+    function note(t) { noteEl.hidden = !t; noteEl.textContent = t || ''; }
 
     function init() {
       if (map) return true;
@@ -961,7 +1175,7 @@
 
     function available() {
       const [lat, lon] = center, list = [];
-      if (inNorthAmerica(lat, lon)) list.push('eccc-rain', 'eccc-snow');
+      if (inNorthAmerica(lat, lon)) list.push('eccc', 'eccc-type');
       if (inConus(lat, lon)) list.push('iem');
       list.push('rv');
       return list;
@@ -969,87 +1183,134 @@
     function pick() {
       if (forced && available().includes(forced)) return forced;
       const [lat, lon] = center;
-      const eccc = temp != null && temp <= 0.5 ? 'eccc-snow' : 'eccc-rain';
-      if (cc === 'CA') return eccc;
+      if (cc === 'CA') return 'eccc';
       if (cc === 'US' && inConus(lat, lon)) return 'iem';
-      if (inNorthAmerica(lat, lon)) return eccc;
+      if (inNorthAmerica(lat, lon)) return 'eccc';
       return 'rv';
     }
+    const sig = () => `${pick()}|${hours}|${snow}`;
 
-    function setLocation(lat, lon, country, curTemp) {
+    function setLocation(lat, lon, country) {
       const moved = !center || haversine(center[0], center[1], lat, lon) > 1;
-      center = [lat, lon]; cc = country || null; temp = curTemp ?? null;
+      center = [lat, lon]; cc = country || null;
       if (!init()) return;
       if (moved) map.jumpTo({ center: [lon, lat], zoom: 7 });
       if (!marker) {
         const el = document.createElement('div'); el.className = 'me';
         marker = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
       } else marker.setLngLat([lon, lat]);
-      if (ready && (pick() !== source || Date.now() - loadedAt > 4 * 60e3)) load();
+      if (ready && (sig() !== loadedSig || Date.now() - loadedAt > 4 * 60e3)) load();
+    }
+    // ECCC's snow layer re-scales *every* echo as snowfall, so only use it when snow is actually happening
+    function setSnow(b) {
+      if (b === snow) return;
+      snow = b;
+      if (ready && center && pick() === 'eccc') load();
     }
 
-    // ECCC publishes a frame every 6 minutes; read the real timeline from GetCapabilities
-    async function ecccTimes(layer, n) {
+    // Read a layer's real timeline from GetCapabilities (ECCC keeps 3 h, every 6 min)
+    async function ecccTimes(layer, n, strict) {
       const step = 6 * 60e3;
       try {
-        const xml = await (await fetch(`${GEOMET}?service=WMS&version=1.3.0&request=GetCapabilities&layer=${layer}`)).text();
+        const xml = await (await fetch(`${GEOMET}?service=WMS&version=1.3.0&request=GetCapabilities&layer=${encodeURIComponent(layer)}`)).text();
         const spec = xml.match(/<Dimension[^>]*name="time"[^>]*>([^<]+)<\/Dimension>/i)[1].trim();
-        if (spec.includes(',')) return spec.split(',').map(s => Date.parse(s.split('/')[0].trim())).filter(Number.isFinite).slice(-n);
-        const [s, e, p] = spec.split('/');
+        if (spec.includes(',')) return spec.split(',').map(x => Date.parse(x.split('/')[0].trim())).filter(Number.isFinite).slice(-n);
+        const [a, e, p] = spec.split('/');
         const pm = /PT(\d+)M/.exec(p || ''), st = pm ? +pm[1] * 60e3 : step;
         const out = [];
-        for (let t = Date.parse(e); t >= Date.parse(s) && out.length < n; t -= st) out.unshift(t);
+        for (let t = Date.parse(e); t >= Date.parse(a) && out.length < n; t -= st) out.unshift(t);
         if (out.length) return out;
-      } catch { /* fall back to a computed timeline */ }
+      } catch { /* fall through */ }
+      if (strict) return [];
       const end = Math.floor((Date.now() - 10 * 60e3) / step) * step;
       return Array.from({ length: n }, (_, i) => end - (n - 1 - i) * step);
+    }
+    // keep every n-th item counting back from the newest
+    const thin = (arr, n) => arr.filter((_, i) => (arr.length - 1 - i) % n === 0);
+    const wms = (layer, t) => `${GEOMET}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&LAYERS=${encodeURIComponent(layer)}&STYLES=&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX={bbox-epsg-3857}&TIME=${new Date(t).toISOString().replace('.000Z', 'Z')}`;
+    const utcStamp = t => new Date(t).toISOString().replace(/[-:T]/g, '').slice(0, 12);
+    const IEM = 'https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/';
+    const IEM_ATTR = 'NEXRAD via Iowa Environmental Mesonet';
+
+    async function buildFrames(key, h) {
+      const fr = [];
+      if (key === 'eccc' || key === 'eccc-type') {
+        const layer = key === 'eccc-type' ? SRC[key].layer : snow ? 'RADAR_1KM_RSNO' : 'RADAR_1KM_RRAI';
+        const since = Date.now() - h * 3600e3 - 3 * 60e3;
+        const past = thin((await ecccTimes(layer, 31)).filter(t => t >= since), h <= 1 ? 1 : 2);
+        past.forEach(t => fr.push({ t, size: 512, attr: '© Environment and Climate Change Canada', url: wms(layer, t) }));
+        if (key === 'eccc' && past.length) {
+          // Environment Canada's radar extrapolation: where the echoes are heading next
+          const ex = snow ? 'Radar_1km_SnowPrecipRate-Extrapolation' : 'Radar_1km_RainPrecipRate-Extrapolation';
+          const last = past.at(-1), horizon = (h <= 1 ? 60 : 120) * 60e3;
+          const fut = (await ecccTimes(ex, 80, true)).filter(t => t > last && t <= last + horizon);
+          thin(fut.reverse(), h <= 1 ? 1 : 2).reverse().slice(0, 12)
+            .forEach(t => fr.push({ t, fc: true, size: 512, attr: '© Environment and Climate Change Canada', url: wms(ex, t) }));
+        }
+      } else if (key === 'iem') {
+        const step5 = 5 * 60e3, base = Math.floor((Date.now() - 2 * 60e3) / step5) * step5;
+        if (h <= 1) {
+          for (let m = 55; m >= 0; m -= 5) {
+            const name = m === 0 ? 'nexrad-n0q-900913' : `nexrad-n0q-900913-m${String(m).padStart(2, '0')}m`;
+            fr.push({ t: base - m * 60e3, attr: IEM_ATTR, url: `${IEM}${name}/{z}/{x}/{y}.png?_=${base}` });
+          }
+        } else {
+          // IEM archives the US composite every 5 min; sample it for longer loops
+          const stepMin = h <= 3 ? 15 : h <= 12 ? 30 : 60, n = h * 60 / stepMin;
+          const arcBase = Math.floor((Date.now() - 10 * 60e3) / step5) * step5;
+          for (let k = n; k >= 1; k--) {
+            const t = arcBase - k * stepMin * 60e3; // stays on IEM's 5-min marks
+            fr.push({ t, attr: IEM_ATTR, url: `${IEM}ridge::USCOMP-N0Q-${utcStamp(t)}/{z}/{x}/{y}.png` });
+          }
+          fr.push({ t: base, attr: IEM_ATTR, url: `${IEM}nexrad-n0q-900913/{z}/{x}/{y}.png?_=${base}` });
+        }
+      } else {
+        const j = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
+        const since = Date.now() - h * 3600e3 - 5 * 60e3;
+        (j.radar?.past || []).filter(f => f.time * 1000 >= since)
+          .forEach(f => fr.push({ t: f.time * 1000, maxzoom: 7, attr: '<a href="https://www.rainviewer.com">Weather data by RainViewer</a>', url: `${j.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png` }));
+      }
+      return fr;
     }
 
     async function load() {
       if (!ready || !center) return;
-      const seq = ++loadSeq, key = pick();
-      stop();
-      let fr = [];
-      try {
-        if (key.startsWith('eccc')) {
-          const layer = SRC[key].layer;
-          fr = (await ecccTimes(layer, 16)).map(t => ({
-            t, size: 512, attr: '© Environment and Climate Change Canada',
-            url: `${GEOMET}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&FORMAT=image/png&TRANSPARENT=TRUE&LAYERS=${layer}&STYLES=&CRS=EPSG:3857&WIDTH=512&HEIGHT=512&BBOX={bbox-epsg-3857}&TIME=${new Date(t).toISOString().replace('.000Z', 'Z')}`,
-          }));
-        } else if (key === 'iem') {
-          const step = 5 * 60e3, base = Math.floor((Date.now() - 2 * 60e3) / step) * step;
-          for (let m = 55; m >= 0; m -= 5) {
-            const name = m === 0 ? 'nexrad-n0q-900913' : `nexrad-n0q-900913-m${String(m).padStart(2, '0')}m`;
-            fr.push({ t: base - m * 60e3, attr: 'NEXRAD via Iowa Environmental Mesonet', url: `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/${name}/{z}/{x}/{y}.png?_=${base}` });
-          }
-        } else {
-          const j = await getJSON('https://api.rainviewer.com/public/weather-maps.json');
-          fr = (j.radar?.past || []).map(f => ({ t: f.time * 1000, maxzoom: 7, attr: '<a href="https://www.rainviewer.com">Weather data by RainViewer</a>', url: `${j.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png` }));
-        }
-      } catch {
-        timeEl.textContent = 'offline';
-        return;
+      const seq = ++loadSeq, want = pick(), s = sig();
+      let key = want, h = hours, msgTxt = '';
+      // ECCC keeps only 3 h of radar; RainViewer 2 h. Fill longer loops from the US archive where it reaches.
+      if (h > 3 && key.startsWith('eccc')) {
+        if (inConus(...center)) { key = 'iem'; msgTxt = cc === 'CA' ? 'Beyond 3 h: US NEXRAD archive — coverage thins north of the border' : ''; }
+        else { h = 3; msgTxt = 'Environment Canada keeps 3 h of radar'; }
       }
-      if (seq !== loadSeq || !fr.length) return; // superseded while loading
+      if (h > 2 && key === 'rv') { h = 2; msgTxt = 'RainViewer keeps 2 h of radar'; }
+      stop();
+      let fr;
+      try { fr = await buildFrames(key, h); } catch { fr = []; }
+      if (seq !== loadSeq) return; // superseded while loading
+      if (!fr.length) { timeEl.textContent = 'offline'; return; }
       clearFrames();
-      source = key; loadedAt = Date.now(); frames = fr;
-      srcEl.textContent = SRC[key].label;
-      $('#radar-legend').style.setProperty('--legend', SRC[key].legend);
-      $('#legend-l').textContent = key === 'eccc-snow' ? 'Light snow' : 'Light';
+      source = want; loadedSig = s; loadedAt = Date.now(); frames = fr;
+      latest = fr.reduce((a, f, i) => (f.fc ? a : i), 0);
+      const isType = key === 'eccc-type';
+      srcEl.textContent = key === 'eccc' ? `ECCC · ${snow ? 'Snow' : 'Rain'}` : key === 'iem' && want !== 'iem' ? 'NEXRAD archive' : SRC[key].label;
+      $('#radar-legend i').style.display = isType ? 'none' : '';
+      $('#radar-legend').style.setProperty('--legend', key === 'eccc' && snow ? SNOW_LEGEND : SRC[key].legend || '');
+      $('#legend-l').textContent = isType ? 'Rain · snow · mix' : key === 'eccc' && snow ? 'Light snow' : 'Light';
+      $('#legend-r').textContent = isType ? '' : 'Heavy';
+      note(msgTxt);
       const before = map.getLayer('alerts-fill') ? 'alerts-fill' : firstSymbol;
       frames.forEach((f, i) => {
         map.addSource('rf' + i, { type: 'raster', tiles: [f.url], tileSize: f.size || 256, maxzoom: f.maxzoom || 12, attribution: f.attr });
         map.addLayer({ id: 'rf' + i, type: 'raster', source: 'rf' + i, paint: { 'raster-opacity': 0, 'raster-opacity-transition': { duration: 0 }, 'raster-fade-duration': 0 } }, before);
       });
       range.max = frames.length - 1;
-      ticksEl.innerHTML = frames.map(() => '<i></i>').join('');
+      ticksEl.innerHTML = frames.map(f => `<i${f.fc ? ' class="fc"' : ''}></i>`).join('');
       idx = 0;
-      show(frames.length - 1);
+      show(latest);
       setTimeout(() => seq === loadSeq && play(), 1500);
     }
     function clearFrames() {
-      for (let i = 0; i < 40; i++) {
+      for (let i = 0; i < 64; i++) {
         if (map.getLayer('rf' + i)) map.removeLayer('rf' + i);
         if (map.getSource('rf' + i)) map.removeSource('rf' + i);
       }
@@ -1062,20 +1323,27 @@
       idx = (i + frames.length) % frames.length;
       map.setPaintProperty('rf' + idx, 'raster-opacity', 0.85);
       range.value = idx;
-      [...ticksEl.children].forEach((el, k) => { el.className = k === idx ? 'cur' : k < idx ? 'on' : ''; });
+      [...ticksEl.children].forEach((el, k) => {
+        el.classList.toggle('cur', k === idx);
+        el.classList.toggle('on', k < idx);
+      });
       const f = frames[idx], mins = Math.round((f.t - Date.now()) / 60000);
-      timeEl.innerHTML = `${fmt('rt', { hour: 'numeric', minute: '2-digit' }).format(f.t)}<small>${idx === frames.length - 1 ? 'latest' : mins + ' min'}</small>`;
+      const long = frames.length && frames.at(-1).t - frames[0].t > 6 * 3600e3;
+      const clockTxt = fmt(long ? 'rtl' : 'rt', long ? { weekday: 'short', hour: 'numeric', minute: '2-digit' } : { hour: 'numeric', minute: '2-digit' }).format(f.t);
+      const rel = f.fc ? `+${Math.max(0, mins)} min · forecast` : idx === latest ? 'latest' : Math.abs(mins) >= 90 ? `${Math.round(mins / 60)} h` : `${mins} min`;
+      timeEl.innerHTML = `${clockTxt}<small>${rel}</small>`;
     }
     function play() {
       if (!frames.length || playing) return;
       playing = true; playBtn.classList.add('playing');
+      const step = frames.length > 20 ? 300 : 420;
       const tick = () => {
         if (!playing) return;
         const next = (idx + 1) % frames.length;
         show(next);
-        timer = setTimeout(tick, next === frames.length - 1 ? 1800 : 420);
+        timer = setTimeout(tick, next === frames.length - 1 || next === latest ? 1500 : step);
       };
-      timer = setTimeout(tick, 420);
+      timer = setTimeout(tick, step);
     }
     function stop() { playing = false; clearTimeout(timer); playBtn.classList.remove('playing'); }
 
@@ -1103,8 +1371,18 @@
       forced = list[(list.indexOf(source) + 1) % list.length];
       load();
     });
+    const segBtns = [...document.querySelectorAll('#radar-range-seg button')];
+    const markSeg = () => segBtns.forEach(b => b.classList.toggle('on', +b.dataset.h === hours));
+    markSeg();
+    $('#radar-range-seg').addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      e.stopPropagation();
+      hours = +b.dataset.h; store.set('radarHours', hours); markSeg();
+      load();
+    });
     document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
-    return { setLocation, setAlerts, expand, reload: () => ready && load() };
+    return { setLocation, setAlerts, setSnow, expand, reload: () => ready && load() };
   })();
 
   /* ---------------- Places sheet ---------------- */
@@ -1159,7 +1437,7 @@
   function selectPlace(id) {
     S.sel = id; store.set('sel', id);
     S.loading = false; // let the new refresh supersede any in-flight one
-    S.local = null; S.aq = null; S.daySel = 0;
+    S.local = null; S.aq = null; S.sev = null; S.daySel = 0;
     $('#alerts').innerHTML = '';
     window.scrollTo({ top: 0 });
     refresh();
@@ -1270,9 +1548,10 @@
   /* ---------------- Boot ---------------- */
   const snap = store.get('snap2', null);
   if (snap?.wx && snap.loc && (snap.loc.id === S.sel || (S.sel === 'gps' && snap.loc.gps))) {
-    Object.assign(S, { loc: snap.loc, wx: snap.wx, aq: snap.aq, local: snap.local, fetchedAt: snap.at });
+    Object.assign(S, { loc: snap.loc, wx: snap.wx, aq: snap.aq, local: snap.local, sev: snap.sev, fetchedAt: snap.at });
     renderAll();
-    Radar.setLocation(snap.loc.lat, snap.loc.lon, snap.loc.cc, snap.wx.current?.temperature_2m);
+    Radar.setSnow(snowingNow());
+    Radar.setLocation(snap.loc.lat, snap.loc.lon, snap.loc.cc);
     Radar.setAlerts(snap.local?.alerts);
   } else {
     document.body.classList.add('loading');
