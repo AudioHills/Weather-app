@@ -1110,7 +1110,7 @@
     const SRC = {
       eccc: { label: 'ECCC', legend: 'linear-gradient(90deg,#a5f3fc,#38bdf8,#2563eb,#22c55e,#facc15,#f97316,#dc2626,#a21caf)' },
       'eccc-type': { label: 'ECCC · Type', layer: 'Radar_1km_SfcPrecipType' },
-      iem: { label: 'NEXRAD', legend: 'linear-gradient(90deg,#4ade80,#16a34a,#facc15,#f97316,#dc2626,#c026d3)' },
+      iem: { label: 'NEXRAD + HRRR', legend: 'linear-gradient(90deg,#4ade80,#16a34a,#facc15,#f97316,#dc2626,#c026d3)' },
       rv: { label: 'RainViewer', legend: 'linear-gradient(90deg,#9be7ff,#3fa9f5,#1f5fd1,#f5d742,#f5732f,#e13a3a)' },
     };
     const SNOW_LEGEND = 'linear-gradient(90deg,#e0f2fe,#93c5fd,#60a5fa,#3b82f6,#8b5cf6,#c026d3)';
@@ -1183,19 +1183,19 @@
 
     function available() {
       const [lat, lon] = center, list = [];
-      if (inNorthAmerica(lat, lon)) list.push('eccc', 'eccc-type');
       if (inConus(lat, lon)) list.push('iem');
+      if (inNorthAmerica(lat, lon)) list.push('eccc', 'eccc-type');
       list.push('rv');
       return list;
     }
     function pick() {
       if (forced && available().includes(forced)) return forced;
       const [lat, lon] = center;
-      if (cc === 'CA') return 'eccc';
-      if (cc === 'US' && inConus(lat, lon)) return 'iem';
+      if (inConus(lat, lon)) return 'iem';
       if (inNorthAmerica(lat, lon)) return 'eccc';
       return 'rv';
     }
+    const HRRR_MAX_H = 18;
     const sig = () => `${pick()}|${hours}|${snow}`;
 
     function setLocation(lat, lon, country) {
@@ -1289,6 +1289,13 @@
     // Timeline = latest radar ("now") → radar extrapolation → model-simulated precipitation, out to +h hours
     async function buildFrames(key, h) {
       const [lat, lon] = center;
+      if (key === 'iem') {
+        const nowFrame = await observedNow('iem');
+        const hh = Math.min(h, HRRR_MAX_H), stepMin = { 1: 15, 3: 15, 12: 30 }[hh] || 60;
+        let fut = [];
+        try { fut = await hrrrFrames(nowFrame.t, nowFrame.t + hh * 3600e3, stepMin); } catch { fut = []; }
+        return { frames: [nowFrame, ...fut], hrrrMissing: !fut.length };
+      }
       const obs = await observedNow(key);
       const nowFrame = obs.frame || obs;
       if (!nowFrame?.t) return { frames: [] };
@@ -1338,6 +1345,7 @@
       latest = res.pastOnly ? fr.length - 1 : 0;
       const isType = key === 'eccc-type';
       srcEl.textContent = key === 'eccc' ? `ECCC · ${snow ? 'Snow' : 'Rain'}` : SRC[key].label;
+      markSeg();
       $('#radar-legend i').style.display = isType ? 'none' : '';
       $('#radar-legend').style.setProperty('--legend', key === 'eccc' && snow ? SNOW_LEGEND : SRC[key].legend || '');
       $('#legend-l').textContent = isType ? 'Rain · snow · mix' : key === 'eccc' && snow ? 'Light snow' : 'Light';
@@ -1347,7 +1355,7 @@
       failed = new Set();
       const ahead = fr.filter(f => f.kind !== 'now');
       const allDry = !res.pastOnly && ahead.length > 1 && ahead.every(f => dryAt(f.t));
-      note(noteBase = allDry ? `No precipitation forecast at your location through +${hours} h — zoom out to see rain elsewhere` : res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
+      note(noteBase = res.hrrrMissing ? 'HRRR forecast unavailable right now — showing current radar' : key === 'iem' && !allDry ? '' : allDry ? `No precipitation forecast at your location through +${hours} h — zoom out to see rain elsewhere` : res.pastOnly ? 'Future radar isn’t available here — showing the past hour'
         : models.length ? `${res.radarEnd ? `After ${fmt('rt', { hour: 'numeric', minute: '2-digit' }).format(res.radarEnd)}: ` : ''}${models.join(' + ')} model-simulated precipitation${short ? ' (as far as the model goes)' : ''}`
           : short ? 'Radar forecast only reaches this far right now' : '');
       const before = map.getLayer('alerts-fill') ? 'alerts-fill' : firstSymbol;
@@ -1456,7 +1464,11 @@
       load();
     });
     const segBtns = [...document.querySelectorAll('#radar-range-seg button')];
-    const markSeg = () => segBtns.forEach(b => b.classList.toggle('on', +b.dataset.h === hours));
+    const markSeg = () => segBtns.forEach(b => {
+      const h = +b.dataset.h, capped = h === 24 && center && pick() === 'iem';
+      b.textContent = capped ? `+${HRRR_MAX_H}h` : `+${h}h`;
+      b.classList.toggle('on', h === hours);
+    });
     markSeg();
     $('#radar-range-seg').addEventListener('click', e => {
       const b = e.target.closest('button');
